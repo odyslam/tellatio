@@ -29,6 +29,7 @@
     "node-fetch": "3.3.2"
   },
   "dependencies": {
+    "@grammyjs/types": "^3.22.2",
     "@types/node-telegram-bot-api": "^0.64.11",
     "attio": "latest",
     "axios": "^1.12.2",
@@ -36,6 +37,8 @@
     "nanoid": "^5.1.6",
     "node-telegram-bot-api": "^0.66.0",
     "react": "19.1.0",
+    "telegram": "^2.26.22",
+    "ts-node": "^10.9.2",
     "zod": "3.25.67"
   }
 }
