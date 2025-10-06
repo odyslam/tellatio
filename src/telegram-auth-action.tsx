@@ -37,17 +37,13 @@ function TelegramAuthDialog({ recordId, object }: any) {
     setError('');
 
     try {
-      // This would call your server function to initiate authentication
-      const response = await fetch('/api/telegram-auth/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          phoneNumber,
-          recordId,
-        }),
+      // Call Attio server function
+      const result = await (window as any).attio.callServerFunction('telegram-auth-start', {
+        phoneNumber,
+        recordId,
       });
 
-      if (!response.ok) throw new Error('Failed to start authentication');
+      if (!result.success) throw new Error(result.error || 'Failed to start authentication');
       
       setStep('code');
     } catch (err) {
@@ -67,17 +63,13 @@ function TelegramAuthDialog({ recordId, object }: any) {
     setError('');
 
     try {
-      const response = await fetch('/api/telegram-auth/verify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          phoneNumber,
-          code: verificationCode,
-          recordId,
-        }),
+      const result = await (window as any).attio.callServerFunction('telegram-auth-verify', {
+        phoneNumber,
+        code: verificationCode,
+        recordId,
       });
 
-      if (!response.ok) throw new Error('Invalid code');
+      if (!result.success) throw new Error(result.error || 'Invalid code');
       
       setStep('config');
     } catch (err) {
@@ -93,20 +85,16 @@ function TelegramAuthDialog({ recordId, object }: any) {
     setStep('syncing');
 
     try {
-      const response = await fetch('/api/telegram-auth/configure', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          recordId,
-          syncConfig,
-        }),
+      const result = await (window as any).attio.callServerFunction('telegram-auth-configure', {
+        recordId,
+        syncConfig,
       });
 
-      if (!response.ok) throw new Error('Configuration failed');
+      if (!result.success) throw new Error(result.error || 'Configuration failed');
       
       // Success - close dialog after showing success state
       setTimeout(() => {
-        window.close();
+        (window as any).attio.closeDialog();
       }, 2000);
     } catch (err) {
       setError('Failed to configure sync settings.');

@@ -228,4 +228,36 @@ export class AttioAPI {
       return [];
     }
   }
-}
+
+  async getRecord(objectType: string, recordId: string): Promise<any | null> {
+    try {
+      const response = await this.context.attioFetch(`/v2/objects/${objectType}/records/${recordId}`, {
+        method: 'GET',
+      });
+
+      const data = await response.json();
+      return data.data;
+    } catch (error) {
+      console.error('Failed to get record:', error);
+      return null;
+    }
+  }
+
+  async updateRecord(objectType: string, recordId: string, attributes: any): Promise<any | null> {
+    try {
+      const response = await this.context.attioFetch(`/v2/objects/${objectType}/records/${recordId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          data: {
+            values: attributes,
+          },
+        }),
+      });
+
+      const data = await response.json();
+      return data.data;
+    } catch (error) {
+      console.error('Failed to update record:', error);
+      return null;
+    }
+  }
