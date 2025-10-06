@@ -1,4 +1,4 @@
-import { TelegramUserClient, TelegramAuthConfig, ChatSyncConfig } from './server/telegram-user-client';
+import { TelegramUserClient, TelegramAuthConfig, ChatSyncConfig } from './server/telegram-user-client-browser';
 import { AttioAPI } from './server/attio-api';
 import { TelegramSyncEngine } from './server/telegram-sync-engine';
 import { encrypt, decrypt } from './lib/encryption';

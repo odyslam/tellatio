@@ -1,4 +1,4 @@
-import { TelegramUserClient, ChatSyncConfig } from './telegram-user-client';
+import { TelegramUserClient, ChatSyncConfig } from './telegram-user-client-browser';
 import { AttioAPI } from './attio-api';
 
 export interface SyncStats {
