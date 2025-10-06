@@ -1,5 +1,4 @@
-import React, { useState, useEffect } from 'react';
-import type { Widget } from 'attio';
+import { useState, useEffect } from 'react';
 import { z } from 'zod';
 
 const configSchema = z.object({
@@ -13,13 +12,13 @@ interface Note {
   created_at: string;
 }
 
-export const telegramConversationWidget: Widget<z.infer<typeof configSchema>> = {
+export const telegramConversationWidget = {
   slug: 'telegram-conversation',
   name: 'Telegram Conversation',
   description: 'View and send Telegram messages',
   config: configSchema,
   
-  async canRender({ config, record }) {
+  async canRender({ config, record }: any) {
     if (config.recordType === 'people') {
       return !!record.values?.telegram_user_id;
     } else if (config.recordType === 'telegram_chats') {
@@ -28,7 +27,7 @@ export const telegramConversationWidget: Widget<z.infer<typeof configSchema>> = 
     return false;
   },
 
-  ui: ({ context, record, config }) => {
+  ui: ({ context, record, config }: any) => {
     const [notes, setNotes] = useState<Note[]>([]);
     const [loading, setLoading] = useState(true);
     const [message, setMessage] = useState('');

@@ -1,7 +1,5 @@
-import type { AttioContext } from 'attio';
 import type {
   AttioPersonAttributes,
-  AttioCompanyAttributes,
   AttioTelegramChatAttributes,
   AttioNoteData,
   AttioTaskData,
@@ -9,7 +7,7 @@ import type {
 } from '../types/attio.types';
 
 export class AttioAPI {
-  constructor(private context: AttioContext) {}
+  constructor(private context: any) {}
 
   async findPersonByTelegramId(telegramUserId: string): Promise<AttioRecord | null> {
     try {

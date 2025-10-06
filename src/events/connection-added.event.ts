@@ -1,9 +1,8 @@
-import type { EventHandler } from 'attio';
 import { TelegramAPI } from '../server/telegram-api';
 import { getConfig } from '../server/config';
 
-export const connectionAddedEvent: EventHandler<'connection-added'> = {
-  async run(event, context) {
+export const connectionAddedEvent = {
+  async run(event: any, context: any) {
     try {
       const { connectionId, connectionSlug, credentials } = event.payload;
       

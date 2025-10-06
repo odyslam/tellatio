@@ -1,5 +1,4 @@
-import React, { useState } from 'react';
-import type { Action } from 'attio';
+import { useState } from 'react';
 import { z } from 'zod';
 
 const configSchema = z.object({
@@ -11,17 +10,14 @@ const sendMessageSchema = z.object({
   attachmentUrl: z.string().url().optional(),
 });
 
-export const sendTelegramMessageAction: Action<
-  z.infer<typeof configSchema>,
-  z.infer<typeof sendMessageSchema>
-> = {
+export const sendTelegramMessageAction = {
   slug: 'send-telegram-message',
   name: 'Send Telegram Message',
   description: 'Send a message via Telegram to this person or chat',
   config: configSchema,
   input: sendMessageSchema,
   
-  async canRun({ config, context, record }) {
+  async canRun({ config, context, record }: any) {
     if (config.recordType === 'people') {
       const telegramUserId = record.values?.telegram_user_id;
       return !!telegramUserId;
@@ -32,7 +28,7 @@ export const sendTelegramMessageAction: Action<
     return false;
   },
 
-  ui: ({ input, setInput, isValid }) => {
+  ui: ({ input, setInput, isValid }: any) => {
     const [message, setMessage] = useState(input?.message || '');
     const [attachmentUrl, setAttachmentUrl] = useState(input?.attachmentUrl || '');
 
@@ -101,7 +97,7 @@ export const sendTelegramMessageAction: Action<
     );
   },
 
-  async run({ input, config, context, record }) {
+  async run({ input, config, context, record }: any) {
     const { TelegramAPI } = await import('../server/telegram-api');
     const { AttioAPI } = await import('../server/attio-api');
     

@@ -1,5 +1,4 @@
-import React, { useState, useEffect } from 'react';
-import type { Action } from 'attio';
+import { useState, useEffect } from 'react';
 import { z } from 'zod';
 
 const configSchema = z.object({
@@ -10,17 +9,14 @@ const generateLinkSchema = z.object({
   linkType: z.enum(['personal', 'group']),
 });
 
-export const generateTelegramLinkAction: Action<
-  z.infer<typeof configSchema>,
-  z.infer<typeof generateLinkSchema>
-> = {
+export const generateTelegramLinkAction = {
   slug: 'generate-telegram-link',
   name: 'Generate Telegram Link',
   description: 'Generate a link to connect this record with Telegram',
   config: configSchema,
   input: generateLinkSchema,
   
-  async canRun({ config, record }) {
+  async canRun({ config, record }: any) {
     if (config.recordType === 'people') {
       return !record.values?.telegram_user_id;
     } else if (config.recordType === 'companies') {
@@ -29,7 +25,7 @@ export const generateTelegramLinkAction: Action<
     return false;
   },
 
-  ui: ({ input, setInput, record, config }) => {
+  ui: ({ input, setInput, record, config }: any) => {
     const [linkUrl, setLinkUrl] = useState<string>('');
     const [copied, setCopied] = useState(false);
 
@@ -125,7 +121,7 @@ export const generateTelegramLinkAction: Action<
     );
   },
 
-  async run({ input, record }) {
+  async run({ input, record }: any) {
     const botUsername = 'TellatioBot'; // Replace with actual bot username
     let link: string;
     

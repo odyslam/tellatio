@@ -15,7 +15,7 @@
     "forceConsistentCasingInFileNames": true,
     "jsx": "react-jsx",
     "lib": ["ES2020", "DOM", "DOM.Iterable"],
-    "module": "ES6",
+    "module": "ESNext",
     "moduleResolution": "bundler",
     "noFallthroughCasesInSwitch": true,
     "noImplicitAny": true,
@@ -35,7 +35,7 @@
     "strictNullChecks": true,
     "strictPropertyInitialization": true,
     "target": "ES2019",
-    "types": ["attio/client"]
+    "types": ["attio/client", "node"]
   },
   "exclude": ["node_modules"],
   "include": ["src", ".attio"]

@@ -1,10 +1,9 @@
-import type { WebhookHandler } from 'attio';
 import type { TelegramWebhookData } from '../types/telegram.types';
 import { MessageProcessor } from '../server/message-processor';
 import { getConfig } from '../server/config';
 
-export const telegramWebhook: WebhookHandler = {
-  async handleRequest(request, context) {
+export const telegramWebhook = {
+  async handleRequest(request: Request, context: any) {
     try {
       const secretToken = request.headers.get('X-Telegram-Bot-Api-Secret-Token');
       const expectedSecret = getConfig().telegramWebhookSecret;

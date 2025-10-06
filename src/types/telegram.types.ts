@@ -19,6 +19,7 @@ export interface TelegramMessage {
   video?: TelegramVideo;
   caption?: string;
   entities?: TelegramEntity[];
+  new_chat_members?: TelegramUser[];
 }
 
 export interface TelegramUser {

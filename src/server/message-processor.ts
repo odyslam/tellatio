@@ -1,16 +1,14 @@
-import type { AttioContext } from 'attio';
 import type { TelegramMessage, TelegramWebhookData } from '../types/telegram.types';
 import { AttioAPI } from './attio-api';
 import { TelegramAPI } from './telegram-api';
 import { FileHandler } from './file-handler';
-import { nanoid } from 'nanoid';
 
 export class MessageProcessor {
   private attioApi: AttioAPI;
   private telegramApi: TelegramAPI;
   private fileHandler: FileHandler;
 
-  constructor(context: AttioContext) {
+  constructor(context: any) {
     this.attioApi = new AttioAPI(context);
     this.telegramApi = new TelegramAPI();
     this.fileHandler = new FileHandler();

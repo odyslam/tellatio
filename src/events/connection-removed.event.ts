@@ -1,8 +1,7 @@
-import type { EventHandler } from 'attio';
 import { TelegramAPI } from '../server/telegram-api';
 
-export const connectionRemovedEvent: EventHandler<'connection-removed'> = {
-  async run(event, context) {
+export const connectionRemovedEvent = {
+  async run(event: any, context: any) {
     try {
       const { connectionId, connectionSlug, credentials } = event.payload;
       
