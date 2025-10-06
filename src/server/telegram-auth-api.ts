@@ -195,10 +195,11 @@ export async function configureSyncSettings(req: any, res: any) {
 // Webhook handler for real-time updates
 export async function handleTelegramWebhook(req: any, res: any) {
   try {
-    const { recordId, update } = req.body;
+    // const { recordId, update } = req.body;
     
     // This would handle real-time message updates
     // Implementation depends on how we set up the webhook with Telegram
+    // TODO: Implement webhook processing
     
     return res.json({ success: true });
   } catch (error) {

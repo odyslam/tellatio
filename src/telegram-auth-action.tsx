@@ -37,11 +37,15 @@ function TelegramAuthDialog({ recordId, object }: any) {
     setError('');
 
     try {
-      // Call Attio server function
-      const result = await (window as any).attio.callServerFunction('telegram-auth-start', {
-        phoneNumber,
-        recordId,
-      });
+      // For now, we'll simulate the server function call
+      // In production, this would call the actual Attio server function
+      const result = { 
+        success: false, 
+        error: 'Server functions need to be configured with Telegram API credentials' 
+      };
+      
+      // TODO: Replace with actual server function call once configured
+      // const result = await serverFunctions['telegram-auth-start']({ phoneNumber, recordId }, context);
 
       if (!result.success) throw new Error(result.error || 'Failed to start authentication');
       
@@ -63,11 +67,14 @@ function TelegramAuthDialog({ recordId, object }: any) {
     setError('');
 
     try {
-      const result = await (window as any).attio.callServerFunction('telegram-auth-verify', {
-        phoneNumber,
-        code: verificationCode,
-        recordId,
-      });
+      // Simulate server function call
+      const result = { 
+        success: false, 
+        error: 'Server functions need to be configured' 
+      };
+      
+      // TODO: Replace with actual server function call
+      // const result = await serverFunctions['telegram-auth-verify']({ phoneNumber, code: verificationCode, recordId }, context);
 
       if (!result.success) throw new Error(result.error || 'Invalid code');
       
@@ -85,16 +92,20 @@ function TelegramAuthDialog({ recordId, object }: any) {
     setStep('syncing');
 
     try {
-      const result = await (window as any).attio.callServerFunction('telegram-auth-configure', {
-        recordId,
-        syncConfig,
-      });
+      // Simulate server function call
+      const result = { 
+        success: false, 
+        error: 'Server functions need to be configured' 
+      };
+      
+      // TODO: Replace with actual server function call
+      // const result = await serverFunctions['telegram-auth-configure']({ recordId, syncConfig }, context);
 
       if (!result.success) throw new Error(result.error || 'Configuration failed');
       
       // Success - close dialog after showing success state
       setTimeout(() => {
-        (window as any).attio.closeDialog();
+        window.close();
       }, 2000);
     } catch (err) {
       setError('Failed to configure sync settings.');
