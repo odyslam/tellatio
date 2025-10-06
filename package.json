@@ -23,12 +23,17 @@
   "devDependencies": {
     "@biomejs/biome": "^2.0.0",
     "@types/react": "19.1.8",
-    "node-fetch": "3.3.2",
+    "@typescript-eslint/parser": "^8.34.1",
     "eslint": "^9.29.0",
-    "@typescript-eslint/parser": "^8.34.1"
+    "node-fetch": "3.3.2"
   },
   "dependencies": {
+    "@types/node-telegram-bot-api": "^0.64.11",
     "attio": "latest",
+    "axios": "^1.12.2",
+    "crypto": "^1.0.1",
+    "nanoid": "^5.1.6",
+    "node-telegram-bot-api": "^0.66.0",
     "react": "19.1.0",
     "zod": "3.25.67"
   }
