@@ -1,44 +1,21 @@
 {
-  "name": "telegram",
-  "description": "telegram",
+  "name": "tellatio",
+  "description": "Telegram → Attio sync service",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.1.0",
   "scripts": {
-    "attio": "attio",
-    "dev": "attio dev",
-    "build": "attio build",
-    "format": "biome format --write src/",
-    "format:check": "biome format src/",
-    "clean": "rm -rf lib && rm -rf dist",
-    "lint": "npm run lint:biome && npm run lint:attio",
-    "lint:biome": "ATTIO_LINT_MODE='exhaustive' biome lint src/",
-    "lint:biome:fix": "ATTIO_LINT_MODE='exhaustive' biome lint --write src/",
-    "lint:attio": "ATTIO_LINT_MODE='exhaustive' eslint \"src/**/*.{ts,tsx}\" --config eslint.attio.config.js",
-    "lint:attio:fix": "ATTIO_LINT_MODE='exhaustive' eslint \"src/**/*.{ts,tsx}\" --config eslint.attio.config.js --fix",
-    "lint:fix": "npm run lint:biome:fix && npm run lint:attio:fix",
-    "check": "biome check src/",
-    "check:fix": "biome check --write src/",
-    "test": ""
+    "build": "tsc",
+    "dev": "ts-node src/index.ts",
+    "start": "node dist/index.js",
+    "login:telegram": "node scripts/telegram-login.js",
+    "tellatio": "bun src/cli.ts"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.0.0",
-    "@types/node": "^24.6.2",
-    "@types/react": "19.1.8",
-    "@typescript-eslint/parser": "^8.34.1",
-    "eslint": "^9.29.0",
-    "node-fetch": "3.3.2"
+    "@types/node": "^22.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@grammyjs/types": "^3.22.2",
-    "@types/node-telegram-bot-api": "^0.64.11",
-    "attio": "latest",
-    "axios": "^1.12.2",
-    "crypto": "^1.0.1",
-    "nanoid": "^5.1.6",
-    "node-telegram-bot-api": "^0.66.0",
-    "react": "19.1.0",
-    "telegram": "^2.26.22",
-    "ts-node": "^10.9.2",
-    "zod": "3.25.67"
+    "telegram": "^2.26.22"
   }
 }
