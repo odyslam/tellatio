@@ -16,6 +16,7 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "incur": "^0.4.5",
     "telegram": "^2.26.22"
   }
 }

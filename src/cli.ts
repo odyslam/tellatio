@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 /**
  * Tellatio CLI — Full Telegram API for agents.
- * All output is JSON for easy parsing.
+ * Powered by incur for agent discovery, schemas, and token-efficient TOON output.
  *
  * Usage: tellatio <command> [subcommand] [args] [--flags]
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { Cli, z } from "incur";
 import { TelegramClient } from "telegram";
+import { Logger, LogLevel } from "telegram/extensions/Logger";
 import { StringSession } from "telegram/sessions";
 import { Api } from "telegram";
 
@@ -38,45 +40,44 @@ function requireEnv(name: string): string {
 
 // ─── Helpers ────────────────────────────────────────────────────
 
+let commandOutput: unknown;
+
 function die(msg: string): never {
-  console.error(JSON.stringify({ error: msg }));
-  process.exit(1);
+  throw new Error(msg);
 }
 
 function out(data: unknown): void {
-  console.log(JSON.stringify(data, null, 2));
-}
-
-function parseArgs(argv: string[]): { positional: string[]; flags: Record<string, string> } {
-  const positional: string[] = [];
-  const flags: Record<string, string> = {};
-  let i = 0;
-  while (i < argv.length) {
-    if (argv[i].startsWith("--")) {
-      const key = argv[i].slice(2);
-      const next = argv[i + 1];
-      if (next && !next.startsWith("--")) {
-        flags[key] = next;
-        i += 2;
-      } else {
-        flags[key] = "true";
-        i++;
-      }
-    } else {
-      positional.push(argv[i]);
-      i++;
-    }
-  }
-  return { positional, flags };
-}
-
-function flag(flags: Record<string, string>, name: string, def?: string): string | undefined {
-  return flags[name] ?? def;
+  commandOutput = data;
 }
 
 function numFlag(flags: Record<string, string>, name: string, def: number): number {
   const v = flags[name];
   return v ? parseInt(v, 10) : def;
+}
+
+async function runTelegram(operation: () => Promise<void>): Promise<unknown> {
+  commandOutput = undefined;
+  loadEnv();
+  await connect();
+  try {
+    await operation();
+    return commandOutput ?? null;
+  } finally {
+    await disconnect();
+  }
+}
+
+function commandFlags(values: Record<string, string | number | boolean | undefined>): Record<string, string> {
+  const flags: Record<string, string> = {};
+  for (const [key, value] of Object.entries(values)) {
+    if (value === undefined || value === false) continue;
+    flags[key] = value === true ? "true" : String(value);
+  }
+  return flags;
+}
+
+function csv(value: string): string[] {
+  return value.split(",").map((item) => item.trim()).filter(Boolean);
 }
 
 // ─── Telegram Client ────────────────────────────────────────────
@@ -90,8 +91,9 @@ async function connect(): Promise<void> {
 
   client = new TelegramClient(session, apiId, apiHash, {
     connectionRetries: 5,
+    baseLogger: new Logger(LogLevel.ERROR),
   });
-  client.setLogLevel("error" as any);
+  client.setLogLevel(LogLevel.ERROR);
   await client.connect();
 }
 
@@ -954,196 +956,351 @@ async function cmdDraftClear(positional: string[]): Promise<void> {
   out({ chatId, draft: null });
 }
 
-// ── help ────────────────────────────────────────────────────────
+// ── incur CLI ───────────────────────────────────────────────────
 
-function printHelp(): void {
-  out({
-    usage: "tellatio <command> [subcommand] [args] [--flags]",
-    commands: {
-      me: "Get your profile info",
-      chats: {
-        list: "List recent chats [--limit N]",
-        search: "Search chats <query> [--limit N]",
-        info: "Get chat details <chat>",
-        folder: "List chats in a folder <name>",
-        unread: "List chats with unread messages [--limit N]",
-        activity: "Activity digest for a folder <name> [--since X]",
-        status: "Check user's online status <user>",
-      },
-      folders: {
-        list: "List all folders",
-      },
-      msg: {
-        read: "Read messages <chat> [--limit N] [--since X] [--until X] [--date X]",
-        send: "Send a message <chat> <text> [--reply-to N] [--silent] [--no-preview]",
-        edit: "Edit a message <chat> <msg-id> <text>",
-        delete: "Delete messages <chat> <msg-id> [msg-id...] [--revoke]",
-        forward: "Forward messages <from-chat> <to-chat> <msg-id> [msg-id...]",
-        search: "Search messages <chat> <query> [--limit N]",
-        pin: "Pin a message <chat> <msg-id> [--silent]",
-        unpin: "Unpin a message <chat> <msg-id>",
-        "mark-read": "Mark chat as read <chat> [--max-id N]",
-        schedule: "Schedule a message <chat> <text> --at <datetime>",
-        "schedule-list": "List scheduled messages <chat>",
-        "schedule-delete": "Delete scheduled messages <chat> <msg-id> [msg-id...]",
-      },
-      contacts: {
-        list: "List all contacts",
-        add: "Add a contact <phone> <first-name> [last-name]",
-        delete: "Delete a contact <user>",
-        block: "Block a user <user>",
-        unblock: "Unblock a user <user>",
-      },
-      group: {
-        create: "Create a group <title> <user> [user...]",
-        info: "Get group info <chat>",
-        members: "List members <chat> [--limit N]",
-        add: "Add member <chat> <user>",
-        kick: "Remove member <chat> <user>",
-        title: "Set group title <chat> <new-title>",
-        description: "Set group description <chat> <text>",
-        leave: "Leave a group <chat>",
-      },
-      media: {
-        send: "Send a file <chat> <file-path> [caption] [--voice] [--video-note]",
-        download: "Download media <chat> <msg-id> <output-path>",
-      },
-      profile: {
-        "set-bio": "Set bio <text>",
-        "set-name": "Set name <first-name> [last-name]",
-        "set-username": "Set username <username>",
-      },
-      draft: {
-        set: "Set a draft <chat> <text>",
-        clear: "Clear a draft <chat>",
-      },
-    },
-    notes: [
-      "<chat> can be a username (john_doe), phone (+1234567890), or numeric ID",
-      "All output is JSON",
-    ],
+const chats = Cli.create("chats", { description: "Inspect Telegram chats and folders" })
+  .command("list", {
+    description: "List recent chats",
+    options: z.object({ limit: z.number().default(50).describe("Maximum chats to return") }),
+    run: (c) => runTelegram(() => cmdChatsList(commandFlags(c.options))),
+  })
+  .command("search", {
+    description: "Search chats, users, groups, and channels",
+    args: z.object({ query: z.string().describe("Search query") }),
+    options: z.object({ limit: z.number().default(20).describe("Maximum results to return") }),
+    run: (c) => runTelegram(() => cmdChatsSearch([c.args.query], commandFlags(c.options))),
+  })
+  .command("info", {
+    description: "Get chat details",
+    args: z.object({ chat: z.string().describe("Username, phone, or numeric chat ID") }),
+    run: (c) => runTelegram(() => cmdChatsInfo([c.args.chat])),
+  })
+  .command("folder", {
+    description: "List chats in a Telegram folder",
+    args: z.object({ name: z.string().describe("Folder name") }),
+    run: (c) => runTelegram(() => cmdChatsFolder([c.args.name])),
+  })
+  .command("unread", {
+    description: "List chats with unread messages",
+    options: z.object({ limit: z.number().default(50).describe("Maximum chats to scan") }),
+    run: (c) => runTelegram(() => cmdChatsUnread(commandFlags(c.options))),
+  })
+  .command("activity", {
+    description: "Summarize recent activity for a folder",
+    args: z.object({ folder: z.string().describe("Folder name") }),
+    options: z.object({ since: z.string().optional().describe("Time filter: today, yesterday, Nd, Nh, Nm, or YYYY-MM-DD") }),
+    run: (c) => runTelegram(() => cmdChatsActivity([c.args.folder], commandFlags(c.options))),
+  })
+  .command("status", {
+    description: "Check a user's online status",
+    args: z.object({ user: z.string().describe("Username, phone, or numeric user ID") }),
+    run: (c) => runTelegram(() => cmdChatsStatus([c.args.user])),
   });
-}
 
-// ─── Router ─────────────────────────────────────────────────────
+const folders = Cli.create("folders", { description: "Inspect Telegram folders" })
+  .command("list", {
+    description: "List all folders",
+    run: () => runTelegram(cmdFoldersList),
+  });
 
-async function main(): Promise<void> {
-  loadEnv();
+const msg = Cli.create("msg", { description: "Read and manage Telegram messages" })
+  .command("read", {
+    description: "Read messages from a chat",
+    args: z.object({ chat: z.string().describe("Username, phone, or numeric chat ID") }),
+    options: z.object({
+      limit: z.number().default(50).describe("Maximum messages to return"),
+      since: z.string().optional().describe("Lower time bound: today, yesterday, Nd, Nh, Nm, or YYYY-MM-DD"),
+      until: z.string().optional().describe("Upper time bound: today, yesterday, Nd, Nh, Nm, or YYYY-MM-DD"),
+      date: z.string().optional().describe("Exact day shorthand for since and until"),
+      offsetId: z.number().default(0).describe("Telegram offset message ID"),
+      minId: z.number().default(0).describe("Minimum message ID"),
+    }),
+    run: (c) => runTelegram(() => cmdMsgRead([c.args.chat], commandFlags({
+      limit: c.options.limit,
+      since: c.options.since,
+      until: c.options.until,
+      date: c.options.date,
+      "offset-id": c.options.offsetId,
+      "min-id": c.options.minId,
+    }))),
+  })
+  .command("send", {
+    description: "Send a message",
+    args: z.object({
+      chat: z.string().describe("Username, phone, or numeric chat ID"),
+      text: z.string().describe("Message text; quote it if it contains spaces"),
+    }),
+    options: z.object({
+      replyTo: z.number().optional().describe("Message ID to reply to"),
+      silent: z.boolean().default(false).describe("Send without notification"),
+      noPreview: z.boolean().default(false).describe("Disable webpage preview"),
+    }),
+    run: (c) => runTelegram(() => cmdMsgSend([c.args.chat, c.args.text], commandFlags({
+      "reply-to": c.options.replyTo,
+      silent: c.options.silent,
+      "no-preview": c.options.noPreview,
+    }))),
+  })
+  .command("edit", {
+    description: "Edit a message",
+    args: z.object({
+      chat: z.string().describe("Username, phone, or numeric chat ID"),
+      msgId: z.string().describe("Message ID"),
+      text: z.string().describe("New message text; quote it if it contains spaces"),
+    }),
+    run: (c) => runTelegram(() => cmdMsgEdit([c.args.chat, c.args.msgId, c.args.text])),
+  })
+  .command("delete", {
+    description: "Delete one or more messages",
+    args: z.object({
+      chat: z.string().describe("Username, phone, or numeric chat ID"),
+      msgIds: z.string().describe("Comma-separated message IDs"),
+    }),
+    options: z.object({ revoke: z.boolean().default(false).describe("Delete for everyone where supported") }),
+    run: (c) => runTelegram(() => cmdMsgDelete([c.args.chat, ...csv(c.args.msgIds)], commandFlags(c.options))),
+  })
+  .command("forward", {
+    description: "Forward one or more messages",
+    args: z.object({
+      fromChat: z.string().describe("Source chat"),
+      toChat: z.string().describe("Destination chat"),
+      msgIds: z.string().describe("Comma-separated message IDs"),
+    }),
+    run: (c) => runTelegram(() => cmdMsgForward([c.args.fromChat, c.args.toChat, ...csv(c.args.msgIds)])),
+  })
+  .command("search", {
+    description: "Search messages in a chat",
+    args: z.object({
+      chat: z.string().describe("Username, phone, or numeric chat ID"),
+      query: z.string().describe("Search query; quote it if it contains spaces"),
+    }),
+    options: z.object({ limit: z.number().default(20).describe("Maximum messages to return") }),
+    run: (c) => runTelegram(() => cmdMsgSearch([c.args.chat, c.args.query], commandFlags(c.options))),
+  })
+  .command("pin", {
+    description: "Pin a message",
+    args: z.object({
+      chat: z.string().describe("Username, phone, or numeric chat ID"),
+      msgId: z.string().describe("Message ID"),
+    }),
+    options: z.object({ silent: z.boolean().default(false).describe("Pin without notification") }),
+    run: (c) => runTelegram(() => cmdMsgPin([c.args.chat, c.args.msgId], commandFlags(c.options))),
+  })
+  .command("unpin", {
+    description: "Unpin a message",
+    args: z.object({
+      chat: z.string().describe("Username, phone, or numeric chat ID"),
+      msgId: z.string().describe("Message ID"),
+    }),
+    run: (c) => runTelegram(() => cmdMsgUnpin([c.args.chat, c.args.msgId])),
+  })
+  .command("mark-read", {
+    description: "Mark a chat as read",
+    args: z.object({ chat: z.string().describe("Username, phone, or numeric chat ID") }),
+    options: z.object({ maxId: z.number().default(0).describe("Maximum message ID to mark as read") }),
+    run: (c) => runTelegram(() => cmdMsgMarkRead([c.args.chat], commandFlags({ "max-id": c.options.maxId }))),
+  })
+  .command("schedule", {
+    description: "Schedule a message",
+    args: z.object({
+      chat: z.string().describe("Username, phone, or numeric chat ID"),
+      text: z.string().describe("Message text; quote it if it contains spaces"),
+    }),
+    options: z.object({
+      at: z.string().describe("Future datetime, for example 2026-05-06T15:30"),
+      replyTo: z.number().optional().describe("Message ID to reply to"),
+    }),
+    run: (c) => runTelegram(() => cmdMsgSchedule([c.args.chat, c.args.text], commandFlags({
+      at: c.options.at,
+      "reply-to": c.options.replyTo,
+    }))),
+  })
+  .command("schedule-list", {
+    description: "List scheduled messages",
+    args: z.object({ chat: z.string().describe("Username, phone, or numeric chat ID") }),
+    run: (c) => runTelegram(() => cmdMsgScheduleList([c.args.chat])),
+  })
+  .command("schedule-delete", {
+    description: "Delete scheduled messages",
+    args: z.object({
+      chat: z.string().describe("Username, phone, or numeric chat ID"),
+      msgIds: z.string().describe("Comma-separated scheduled message IDs"),
+    }),
+    run: (c) => runTelegram(() => cmdMsgScheduleDelete([c.args.chat, ...csv(c.args.msgIds)])),
+  });
 
-  const { positional, flags } = parseArgs(process.argv.slice(2));
-  const cmd = positional[0];
-  const sub = positional[1];
-  const rest = positional.slice(2);
+const contacts = Cli.create("contacts", { description: "Manage Telegram contacts" })
+  .command("list", {
+    description: "List all contacts",
+    run: () => runTelegram(cmdContactsList),
+  })
+  .command("add", {
+    description: "Add a contact",
+    args: z.object({
+      phone: z.string().describe("Phone number"),
+      firstName: z.string().describe("First name"),
+      lastName: z.string().optional().describe("Last name"),
+    }),
+    run: (c) => runTelegram(() => cmdContactsAdd([c.args.phone, c.args.firstName, c.args.lastName ?? ""])),
+  })
+  .command("delete", {
+    description: "Delete a contact",
+    args: z.object({ user: z.string().describe("Username, phone, or numeric user ID") }),
+    run: (c) => runTelegram(() => cmdContactsDelete([c.args.user])),
+  })
+  .command("block", {
+    description: "Block a user",
+    args: z.object({ user: z.string().describe("Username, phone, or numeric user ID") }),
+    run: (c) => runTelegram(() => cmdContactsBlock([c.args.user])),
+  })
+  .command("unblock", {
+    description: "Unblock a user",
+    args: z.object({ user: z.string().describe("Username, phone, or numeric user ID") }),
+    run: (c) => runTelegram(() => cmdContactsUnblock([c.args.user])),
+  });
 
-  if (!cmd || cmd === "help") {
-    printHelp();
-    return;
-  }
+const group = Cli.create("group", { description: "Manage Telegram groups and channels" })
+  .command("create", {
+    description: "Create a group",
+    args: z.object({
+      title: z.string().describe("Group title"),
+      users: z.string().describe("Comma-separated users to add"),
+    }),
+    run: (c) => runTelegram(() => cmdGroupCreate([c.args.title, ...csv(c.args.users)], {})),
+  })
+  .command("info", {
+    description: "Get group info",
+    args: z.object({ chat: z.string().describe("Username or numeric chat ID") }),
+    run: (c) => runTelegram(() => cmdGroupInfo([c.args.chat])),
+  })
+  .command("members", {
+    description: "List group members",
+    args: z.object({ chat: z.string().describe("Username or numeric chat ID") }),
+    options: z.object({ limit: z.number().default(200).describe("Maximum members to return") }),
+    run: (c) => runTelegram(() => cmdGroupMembers([c.args.chat], commandFlags(c.options))),
+  })
+  .command("add", {
+    description: "Add a member",
+    args: z.object({
+      chat: z.string().describe("Username or numeric chat ID"),
+      user: z.string().describe("Username, phone, or numeric user ID"),
+    }),
+    run: (c) => runTelegram(() => cmdGroupAdd([c.args.chat, c.args.user])),
+  })
+  .command("kick", {
+    description: "Remove a member",
+    args: z.object({
+      chat: z.string().describe("Username or numeric chat ID"),
+      user: z.string().describe("Username, phone, or numeric user ID"),
+    }),
+    run: (c) => runTelegram(() => cmdGroupKick([c.args.chat, c.args.user])),
+  })
+  .command("title", {
+    description: "Set group title",
+    args: z.object({
+      chat: z.string().describe("Username or numeric chat ID"),
+      title: z.string().describe("New title; quote it if it contains spaces"),
+    }),
+    run: (c) => runTelegram(() => cmdGroupTitle([c.args.chat, c.args.title])),
+  })
+  .command("description", {
+    description: "Set group description",
+    args: z.object({
+      chat: z.string().describe("Username or numeric chat ID"),
+      text: z.string().default("").describe("Description text; quote it if it contains spaces"),
+    }),
+    run: (c) => runTelegram(() => cmdGroupDescription([c.args.chat, c.args.text])),
+  })
+  .command("leave", {
+    description: "Leave a group",
+    args: z.object({ chat: z.string().describe("Username or numeric chat ID") }),
+    run: (c) => runTelegram(() => cmdGroupLeave([c.args.chat])),
+  });
 
-  await connect();
+const media = Cli.create("media", { description: "Send and download Telegram media" })
+  .command("send", {
+    description: "Send a file",
+    args: z.object({
+      chat: z.string().describe("Username, phone, or numeric chat ID"),
+      filePath: z.string().describe("Local file path"),
+      caption: z.string().optional().describe("Caption; quote it if it contains spaces"),
+    }),
+    options: z.object({
+      voice: z.boolean().default(false).describe("Send as voice note"),
+      videoNote: z.boolean().default(false).describe("Send as video note"),
+    }),
+    run: (c) => runTelegram(() => cmdMediaSend(
+      [c.args.chat, c.args.filePath, c.args.caption ?? ""],
+      commandFlags({ voice: c.options.voice, "video-note": c.options.videoNote }),
+    )),
+  })
+  .command("download", {
+    description: "Download media from a message",
+    args: z.object({
+      chat: z.string().describe("Username, phone, or numeric chat ID"),
+      msgId: z.string().describe("Message ID"),
+      outputPath: z.string().describe("Output file path"),
+    }),
+    run: (c) => runTelegram(() => cmdMediaDownload([c.args.chat, c.args.msgId, c.args.outputPath])),
+  });
 
-  try {
-    switch (cmd) {
-      case "me":
-        await cmdMe();
-        break;
+const profile = Cli.create("profile", { description: "Manage your Telegram profile" })
+  .command("set-bio", {
+    description: "Set profile bio",
+    args: z.object({ text: z.string().default("").describe("Bio text; quote it if it contains spaces") }),
+    run: (c) => runTelegram(() => cmdProfileSetBio([c.args.text])),
+  })
+  .command("set-name", {
+    description: "Set profile name",
+    args: z.object({
+      firstName: z.string().describe("First name"),
+      lastName: z.string().optional().describe("Last name"),
+    }),
+    run: (c) => runTelegram(() => cmdProfileSetName([c.args.firstName, c.args.lastName ?? ""])),
+  })
+  .command("set-username", {
+    description: "Set profile username",
+    args: z.object({ username: z.string().default("").describe("Username, or empty to clear") }),
+    run: (c) => runTelegram(() => cmdProfileSetUsername([c.args.username])),
+  });
 
-      case "chats":
-        switch (sub) {
-          case "list": await cmdChatsList(flags); break;
-          case "search": await cmdChatsSearch(rest, flags); break;
-          case "info": await cmdChatsInfo(rest); break;
-          case "folder": await cmdChatsFolder(rest); break;
-          case "unread": await cmdChatsUnread(flags); break;
-          case "activity": await cmdChatsActivity(rest, flags); break;
-          case "status": await cmdChatsStatus(rest); break;
-          default: die(`Unknown subcommand: chats ${sub}. Try: list, search, info, folder, unread, activity, status`);
-        }
-        break;
+const draft = Cli.create("draft", { description: "Manage Telegram drafts" })
+  .command("set", {
+    description: "Set a draft",
+    args: z.object({
+      chat: z.string().describe("Username, phone, or numeric chat ID"),
+      text: z.string().default("").describe("Draft text; quote it if it contains spaces"),
+    }),
+    run: (c) => runTelegram(() => cmdDraftSet([c.args.chat, c.args.text])),
+  })
+  .command("clear", {
+    description: "Clear a draft",
+    args: z.object({ chat: z.string().describe("Username, phone, or numeric chat ID") }),
+    run: (c) => runTelegram(() => cmdDraftClear([c.args.chat])),
+  });
 
-      case "folders":
-        switch (sub) {
-          case "list": await cmdFoldersList(); break;
-          default: die(`Unknown subcommand: folders ${sub}. Try: list`);
-        }
-        break;
+const cli = Cli.create("tellatio", {
+  description: "Full Telegram API for AI agents",
+  version: "0.1.0",
+  format: "toon",
+  sync: {
+    suggestions: [
+      "Use tellatio --llms to discover the Telegram command surface.",
+      "Use tellatio msg read <chat> --limit 20 to inspect recent messages.",
+    ],
+  },
+})
+  .command("me", {
+    description: "Get your profile info",
+    run: () => runTelegram(cmdMe),
+  })
+  .command(chats)
+  .command(folders)
+  .command(msg)
+  .command(contacts)
+  .command(group)
+  .command(media)
+  .command(profile)
+  .command(draft);
 
-      case "msg":
-        switch (sub) {
-          case "read": await cmdMsgRead(rest, flags); break;
-          case "send": await cmdMsgSend(rest, flags); break;
-          case "edit": await cmdMsgEdit(rest); break;
-          case "delete": await cmdMsgDelete(rest, flags); break;
-          case "forward": await cmdMsgForward(rest); break;
-          case "search": await cmdMsgSearch(rest, flags); break;
-          case "pin": await cmdMsgPin(rest, flags); break;
-          case "unpin": await cmdMsgUnpin(rest); break;
-          case "mark-read": await cmdMsgMarkRead(rest, flags); break;
-          case "schedule": await cmdMsgSchedule(rest, flags); break;
-          case "schedule-list": await cmdMsgScheduleList(rest); break;
-          case "schedule-delete": await cmdMsgScheduleDelete(rest); break;
-          default: die(`Unknown subcommand: msg ${sub}. Try: read, send, edit, delete, forward, search, pin, unpin, mark-read, schedule, schedule-list, schedule-delete`);
-        }
-        break;
-
-      case "contacts":
-        switch (sub) {
-          case "list": await cmdContactsList(); break;
-          case "add": await cmdContactsAdd(rest); break;
-          case "delete": await cmdContactsDelete(rest); break;
-          case "block": await cmdContactsBlock(rest); break;
-          case "unblock": await cmdContactsUnblock(rest); break;
-          default: die(`Unknown subcommand: contacts ${sub}. Try: list, add, delete, block, unblock`);
-        }
-        break;
-
-      case "group":
-        switch (sub) {
-          case "create": await cmdGroupCreate(rest, flags); break;
-          case "info": await cmdGroupInfo(rest); break;
-          case "members": await cmdGroupMembers(rest, flags); break;
-          case "add": await cmdGroupAdd(rest); break;
-          case "kick": await cmdGroupKick(rest); break;
-          case "title": await cmdGroupTitle(rest); break;
-          case "description": await cmdGroupDescription(rest); break;
-          case "leave": await cmdGroupLeave(rest); break;
-          default: die(`Unknown subcommand: group ${sub}. Try: create, info, members, add, kick, title, description, leave`);
-        }
-        break;
-
-      case "media":
-        switch (sub) {
-          case "send": await cmdMediaSend(rest, flags); break;
-          case "download": await cmdMediaDownload(rest); break;
-          default: die(`Unknown subcommand: media ${sub}. Try: send, download`);
-        }
-        break;
-
-      case "profile":
-        switch (sub) {
-          case "set-bio": await cmdProfileSetBio(rest); break;
-          case "set-name": await cmdProfileSetName(rest); break;
-          case "set-username": await cmdProfileSetUsername(rest); break;
-          default: die(`Unknown subcommand: profile ${sub}. Try: set-bio, set-name, set-username`);
-        }
-        break;
-
-      case "draft":
-        switch (sub) {
-          case "set": await cmdDraftSet(rest); break;
-          case "clear": await cmdDraftClear(rest); break;
-          default: die(`Unknown subcommand: draft ${sub}. Try: set, clear`);
-        }
-        break;
-
-      default:
-        die(`Unknown command: ${cmd}. Run "tellatio help" for usage.`);
-    }
-  } finally {
-    await disconnect();
-  }
-}
-
-main().catch((err) => {
-  die(err instanceof Error ? err.message : String(err));
-});
+cli.serve();

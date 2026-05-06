@@ -111,13 +111,14 @@ The repo includes a Dockerfile. Deploy to Railway and attach a volume at `/data`
 
 ## CLI reference
 
-Full Telegram API for AI agents. All output is JSON. Run with:
+Full Telegram API for AI agents, built with [incur](https://github.com/wevm/incur). Output defaults to token-efficient TOON, and every command also gets incur's global `--json`, `--format`, `--schema`, `--llms`, `--token-count`, `--token-limit`, and `--token-offset` flags. Run with:
 
 ```bash
 bun src/cli.ts <command>
 ```
 
 Chats can be referenced by **username** (`john_doe`), **phone** (`+1234567890`), or **numeric ID**.
+Quote multi-word text arguments. Commands that operate on multiple message IDs or users accept comma-separated values.
 
 ### Commands
 
@@ -136,15 +137,15 @@ folders list                                    All folders
 msg read <chat> [--limit N] [--since X]         Read messages (--until, --date)
 msg send <chat> <text> [--reply-to N]           Send (--silent, --no-preview)
 msg edit <chat> <msg-id> <text>                 Edit
-msg delete <chat> <id> [id...] [--revoke]       Delete
-msg forward <from> <to> <id> [id...]            Forward
+msg delete <chat> <ids> [--revoke]              Delete comma-separated IDs
+msg forward <from> <to> <ids>                   Forward comma-separated IDs
 msg search <chat> <query> [--limit N]           Search in chat
 msg pin <chat> <msg-id> [--silent]              Pin
 msg unpin <chat> <msg-id>                       Unpin
 msg mark-read <chat>                            Mark as read
 msg schedule <chat> <text> --at <datetime>      Schedule a message
 msg schedule-list <chat>                        List scheduled
-msg schedule-delete <chat> <id> [id...]         Cancel scheduled
+msg schedule-delete <chat> <ids>                Cancel comma-separated IDs
 
 contacts list                                   All contacts
 contacts add <phone> <first> [last]             Add contact
@@ -152,7 +153,7 @@ contacts delete <user>                          Delete contact
 contacts block <user>                           Block
 contacts unblock <user>                         Unblock
 
-group create <title> <user> [user...]           Create group
+group create <title> <users>                    Create group with comma-separated users
 group info <chat>                               Group details
 group members <chat> [--limit N]                Members
 group add <chat> <user>                         Add member
