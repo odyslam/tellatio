@@ -15,6 +15,7 @@ export interface ChatInfo {
   idStr: string;
   title: string;
   isGroup: boolean;
+  type: "dm" | "group" | "supergroup" | "channel" | "unknown";
 }
 
 export interface Participant {
@@ -23,6 +24,17 @@ export interface Participant {
   lastName: string;
   phone: string | undefined;
   username: string | undefined;
+}
+
+export interface RecentChat {
+  peer: Api.TypeInputPeer;
+  chatInfo: ChatInfo;
+  unreadCount: number;
+  lastMessage?: {
+    id: number;
+    date: number;
+    text: string;
+  };
 }
 
 let client: TelegramClient | null = null;
@@ -75,6 +87,28 @@ export async function getFolderChatIds(folderName: string): Promise<Api.TypeInpu
   return folder.includePeers;
 }
 
+function entityToChatInfo(entity: unknown): ChatInfo | null {
+  if (entity instanceof Api.User) {
+    const name = [entity.firstName, entity.lastName].filter(Boolean).join(" ") || entity.username || "Unknown";
+    return { idStr: entity.id.toString(), title: name, isGroup: false, type: "dm" };
+  }
+
+  if (entity instanceof Api.Chat) {
+    return { idStr: entity.id.toString(), title: entity.title, isGroup: true, type: "group" };
+  }
+
+  if (entity instanceof Api.Channel) {
+    return {
+      idStr: entity.id.toString(),
+      title: entity.title,
+      isGroup: true,
+      type: entity.megagroup ? "supergroup" : "channel",
+    };
+  }
+
+  return null;
+}
+
 /**
  * Resolve a peer to a ChatInfo with title and group status.
  */
@@ -82,25 +116,51 @@ export async function resolveChat(peer: Api.TypeInputPeer): Promise<ChatInfo | n
   const c = getClient();
   try {
     const entity = await c.getEntity(peer);
-
-    if (entity instanceof Api.User) {
-      const name = [entity.firstName, entity.lastName].filter(Boolean).join(" ") || "Unknown";
-      return { idStr: entity.id.toString(), title: name, isGroup: false };
-    }
-
-    if (entity instanceof Api.Chat) {
-      return { idStr: entity.id.toString(), title: entity.title, isGroup: true };
-    }
-
-    if (entity instanceof Api.Channel) {
-      return { idStr: entity.id.toString(), title: entity.title, isGroup: true };
-    }
-
-    return null;
+    return entityToChatInfo(entity);
   } catch (err) {
     console.error("[telegram] Failed to resolve peer:", err);
     return null;
   }
+}
+
+/**
+ * List recent dialogs as syncable chats. This is used by association mode, where
+ * Attio stores chat IDs and the worker maps those IDs back to live Telegram peers.
+ */
+export async function getRecentChats(limit: number): Promise<RecentChat[]> {
+  const c = getClient();
+  const dialogs = await c.getDialogs({ limit });
+  const chats: RecentChat[] = [];
+
+  for (const dialog of dialogs) {
+    const entity = dialog.entity;
+    if (!entity) continue;
+
+    const chatInfo = entityToChatInfo(entity);
+    if (!chatInfo) continue;
+
+    try {
+      const peer = await c.getInputEntity(entity as never) as Api.TypeInputPeer;
+      const message = dialog.message;
+      const text = message ? (message.text || message.message || "") : "";
+      chats.push({
+        peer,
+        chatInfo,
+        unreadCount: dialog.unreadCount,
+        lastMessage: message
+          ? {
+              id: message.id,
+              date: message.date,
+              text,
+            }
+          : undefined,
+      });
+    } catch (err) {
+      console.error(`[telegram] Failed to get input peer for ${chatInfo.title}:`, err);
+    }
+  }
+
+  return chats;
 }
 
 /**
@@ -156,6 +216,7 @@ export async function getMe(): Promise<{ idStr: string; firstName: string }> {
  * Get a DM partner's phone number and username.
  */
 export async function getUserInfo(peer: Api.TypeInputPeer): Promise<{
+  userIdStr?: string;
   firstName?: string;
   lastName?: string;
   phone?: string;
@@ -166,6 +227,7 @@ export async function getUserInfo(peer: Api.TypeInputPeer): Promise<{
     const entity = await c.getEntity(peer);
     if (entity instanceof Api.User) {
       return {
+        userIdStr: entity.id.toString(),
         firstName: entity.firstName,
         lastName: entity.lastName,
         phone: entity.phone,

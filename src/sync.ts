@@ -11,6 +11,7 @@ import {
 import { computeStrength } from "./strength";
 import type { Config } from "./config";
 import type { TelegramMessage } from "./telegram";
+import type { TelegramAssociation } from "./association";
 
 function todayUTC(): string {
   return new Date().toISOString().slice(0, 10);
@@ -69,10 +70,17 @@ function toStoredMessages(
 interface ChatFetchResult {
   peer: Api.TypeInputPeer;
   chatInfo: telegram.ChatInfo;
+  association?: TelegramAssociation;
   messages: TelegramMessage[];
   stored: StoredMessage[];
   participants?: telegram.Participant[];
-  userInfo?: { firstName?: string; lastName?: string; phone?: string; username?: string };
+  userInfo?: { userIdStr?: string; firstName?: string; lastName?: string; phone?: string; username?: string };
+}
+
+interface SyncChat {
+  peer: Api.TypeInputPeer;
+  chatInfo: telegram.ChatInfo;
+  association?: TelegramAssociation;
 }
 
 /**
@@ -84,21 +92,21 @@ export async function runSync(config: Config): Promise<void> {
   const state = loadState(config.dataDir);
   const me = await telegram.getMe();
 
-  console.log(`[sync] Starting sync cycle. Folder: "${config.folderName}"`);
+  console.log(`[sync] Starting sync cycle. Source: ${config.syncSource}`);
 
-  const peers = await telegram.getFolderChatIds(config.folderName);
-  if (peers.length === 0) {
-    console.log("[sync] No chats in folder. Nothing to do.");
+  const syncChats = await getSyncChats(config);
+  if (syncChats.length === 0) {
+    console.log("[sync] No chats selected for sync.");
     return;
   }
 
-  console.log(`[sync] Found ${peers.length} chats in folder`);
+  console.log(`[sync] Found ${syncChats.length} selected chats`);
 
   // Phase 1: Batch-fetch from Telegram
   const fetched: ChatFetchResult[] = [];
-  for (const peer of peers) {
+  for (const syncChat of syncChats) {
     try {
-      const result = await fetchChat(state, peer, me);
+      const result = await fetchChat(state, syncChat, me);
       if (result) fetched.push(result);
     } catch (err) {
       console.error("[sync] Error fetching chat:", err);
@@ -115,13 +123,15 @@ export async function runSync(config: Config): Promise<void> {
 
   // Phase 2: Process all Attio writes
   // Collect all (recordId → work) so we can parallelize per-person
-  const personWork = new Map<string, Array<() => Promise<void>>>();
+  const recordWork = new Map<string, Array<() => Promise<void>>>();
 
   for (const chat of fetched) {
-    if (chat.chatInfo.isGroup) {
-      await queueGroupWork(chat, me, state, personWork);
+    if (chat.association) {
+      queueAssociatedWork(chat, state, recordWork);
+    } else if (chat.chatInfo.isGroup) {
+      await queueGroupWork(chat, me, state, recordWork, config);
     } else {
-      await queueDMWork(chat, state, personWork);
+      await queueDMWork(chat, state, recordWork, config);
     }
 
     // Update chat sync state
@@ -132,16 +142,16 @@ export async function runSync(config: Config): Promise<void> {
 
   // Execute Attio writes — parallel across persons, sequential within each person
   const CONCURRENCY = 5;
-  const entries = Array.from(personWork.entries());
+  const entries = Array.from(recordWork.entries());
   for (let i = 0; i < entries.length; i += CONCURRENCY) {
     const batch = entries.slice(i, i + CONCURRENCY);
     await Promise.all(
-      batch.map(async ([recordId, tasks]) => {
+      batch.map(async ([recordKey, tasks]) => {
         for (const task of tasks) {
           try {
             await task();
           } catch (err) {
-            console.error(`[sync] Attio write failed for ${recordId}:`, err);
+            console.error(`[sync] Attio write failed for ${recordKey}:`, err);
           }
         }
       }),
@@ -152,13 +162,63 @@ export async function runSync(config: Config): Promise<void> {
   console.log("[sync] Cycle complete");
 }
 
+async function getSyncChats(config: Config): Promise<SyncChat[]> {
+  if (config.syncSource === "folder") {
+    return getFolderSyncChats(config.folderName);
+  }
+
+  try {
+    const associations = await attio.listApprovedTelegramAssociations(config.associationObjectSlug);
+    if (associations.length === 0) {
+      console.log(`[sync] No approved associations found in ${config.associationObjectSlug}`);
+      return config.folderFallbackEnabled ? getFolderSyncChats(config.folderName) : [];
+    }
+
+    const recentChats = await telegram.getRecentChats(config.discoveryDialogLimit);
+    const recentById = new Map(recentChats.map((chat) => [chat.chatInfo.idStr, chat]));
+    const selected: SyncChat[] = [];
+
+    for (const association of associations) {
+      const recent = recentById.get(association.telegramChatId);
+      if (!recent) {
+        console.warn(`[sync] Approved chat not found in recent dialogs: ${association.telegramChatTitle} (${association.telegramChatId})`);
+        continue;
+      }
+
+      selected.push({
+        peer: recent.peer,
+        chatInfo: recent.chatInfo,
+        association,
+      });
+    }
+
+    return selected;
+  } catch (err) {
+    console.error(`[sync] Failed to load approved associations from ${config.associationObjectSlug}:`, err);
+    return config.folderFallbackEnabled ? getFolderSyncChats(config.folderName) : [];
+  }
+}
+
+async function getFolderSyncChats(folderName: string): Promise<SyncChat[]> {
+  console.log(`[sync] Loading legacy Telegram folder: "${folderName}"`);
+  const peers = await telegram.getFolderChatIds(folderName);
+  const chats: SyncChat[] = [];
+
+  for (const peer of peers) {
+    const chatInfo = await telegram.resolveChat(peer);
+    if (!chatInfo) continue;
+    chats.push({ peer, chatInfo });
+  }
+
+  return chats;
+}
+
 async function fetchChat(
   state: SyncState,
-  peer: Api.TypeInputPeer,
+  syncChat: SyncChat,
   me: { idStr: string; firstName: string },
 ): Promise<ChatFetchResult | null> {
-  const chatInfo = await telegram.resolveChat(peer);
-  if (!chatInfo) return null;
+  const { peer, chatInfo, association } = syncChat;
 
   const chatState = getChatState(state, chatInfo.idStr);
   const allMessages = await telegram.getMessages(peer, chatState.lastMessageId);
@@ -172,46 +232,94 @@ async function fetchChat(
   const stored = toStoredMessages(messages, me.idStr, me.firstName);
 
   // Pre-fetch Telegram metadata needed for Attio writes
+  if (association) {
+    return { peer, chatInfo, association, messages, stored };
+  }
+
   if (chatInfo.isGroup) {
     const participants = await telegram.getGroupParticipants(peer);
-    return { peer, chatInfo, messages, stored, participants };
+    return { peer, chatInfo, association, messages, stored, participants };
   } else {
     const userInfo = await telegram.getUserInfo(peer);
-    return { peer, chatInfo, messages, stored, userInfo };
+    return { peer, chatInfo, association, messages, stored, userInfo };
   }
 }
 
 async function queueDMWork(
   chat: ChatFetchResult,
   state: SyncState,
-  personWork: Map<string, Array<() => Promise<void>>>,
+  recordWork: Map<string, Array<() => Promise<void>>>,
+  config: Config,
 ): Promise<void> {
   const normalized = normalizePhone(chat.userInfo?.phone) ?? undefined;
 
-  const recordId = await attio.findOrCreatePerson({
+  const person = await attio.resolveOrCreatePerson({
+    telegramUserId: chat.userInfo?.userIdStr,
     firstName: chat.userInfo?.firstName,
     lastName: chat.userInfo?.lastName,
     phone: normalized,
     username: chat.userInfo?.username,
+  }, {
+    identityObjectSlug: config.identityObjectSlug,
+    autoCreate: config.autoCreatePeople,
+    source: `DM: ${chat.chatInfo.title}`,
   });
 
+  if (!person) {
+    console.warn(`[sync] Skipping DM "${chat.chatInfo.title}" until Telegram identity is reviewed`);
+    return;
+  }
+
+  const recordId = person.recordId;
   const noteTitle = `Telegram · ${chat.chatInfo.title}`;
 
   appendToTranscript(state, recordId, chat.chatInfo.idStr, noteTitle, chat.stored);
   trackInteractions(state, recordId, chat.stored);
 
-  if (!personWork.has(recordId)) personWork.set(recordId, []);
-  personWork.get(recordId)!.push(
-    () => upsertChatNote(state, recordId, chat.chatInfo.idStr),
+  const key = recordKey("people", recordId);
+  if (!recordWork.has(key)) recordWork.set(key, []);
+  recordWork.get(key)!.push(
+    () => upsertChatNote(state, "people", recordId, chat.chatInfo.idStr),
     () => updatePersonStats(state, recordId),
   );
+}
+
+function queueAssociatedWork(
+  chat: ChatFetchResult,
+  state: SyncState,
+  recordWork: Map<string, Array<() => Promise<void>>>,
+): void {
+  if (!chat.association) return;
+
+  const { targetObject, targetRecordId, syncMode } = chat.association;
+  const noteTitle = `Telegram · ${chat.chatInfo.title}`;
+
+  appendToTranscript(state, targetRecordId, chat.chatInfo.idStr, noteTitle, chat.stored);
+
+  if (targetObject === "people") {
+    trackInteractions(state, targetRecordId, chat.stored);
+  }
+
+  const key = recordKey(targetObject, targetRecordId);
+  if (!recordWork.has(key)) recordWork.set(key, []);
+
+  if (syncMode !== "stats") {
+    recordWork.get(key)!.push(
+      () => upsertChatNote(state, targetObject, targetRecordId, chat.chatInfo.idStr),
+    );
+  }
+
+  if (targetObject === "people") {
+    recordWork.get(key)!.push(() => updatePersonStats(state, targetRecordId));
+  }
 }
 
 async function queueGroupWork(
   chat: ChatFetchResult,
   me: { idStr: string; firstName: string },
   state: SyncState,
-  personWork: Map<string, Array<() => Promise<void>>>,
+  recordWork: Map<string, Array<() => Promise<void>>>,
+  config: Config,
 ): Promise<void> {
   const participants = chat.participants || [];
   const seenRecords = new Set<string>();
@@ -220,13 +328,24 @@ async function queueGroupWork(
     if (p.userIdStr === me.idStr) continue;
 
     const normalized = normalizePhone(p.phone) ?? undefined;
-    const recordId = await attio.findOrCreatePerson({
+    const person = await attio.resolveOrCreatePerson({
+      telegramUserId: p.userIdStr,
       firstName: p.firstName,
       lastName: p.lastName,
       phone: normalized,
       username: p.username,
+    }, {
+      identityObjectSlug: config.identityObjectSlug,
+      autoCreate: config.autoCreatePeople,
+      source: `Group: ${chat.chatInfo.title}`,
     });
 
+    if (!person) {
+      console.warn(`[sync] Skipping participant "${[p.firstName, p.lastName].filter(Boolean).join(" ") || p.username || p.userIdStr}" until Telegram identity is reviewed`);
+      continue;
+    }
+
+    const recordId = person.recordId;
     if (seenRecords.has(recordId)) continue;
     seenRecords.add(recordId);
 
@@ -235,9 +354,10 @@ async function queueGroupWork(
     appendToTranscript(state, recordId, chat.chatInfo.idStr, noteTitle, chat.stored);
     trackInteractions(state, recordId, chat.stored);
 
-    if (!personWork.has(recordId)) personWork.set(recordId, []);
-    personWork.get(recordId)!.push(
-      () => upsertChatNote(state, recordId, chat.chatInfo.idStr),
+    const key = recordKey("people", recordId);
+    if (!recordWork.has(key)) recordWork.set(key, []);
+    recordWork.get(key)!.push(
+      () => upsertChatNote(state, "people", recordId, chat.chatInfo.idStr),
       () => updatePersonStats(state, recordId),
     );
   }
@@ -245,6 +365,10 @@ async function queueGroupWork(
   if (seenRecords.size > 0) {
     console.log(`[sync] Group "${chat.chatInfo.title}": ${seenRecords.size} participants queued`);
   }
+}
+
+function recordKey(parentObject: string, recordId: string): string {
+  return `${parentObject}:${recordId}`;
 }
 
 function trackInteractions(state: SyncState, recordId: string, messages: StoredMessage[]): void {
@@ -258,14 +382,19 @@ function trackInteractions(state: SyncState, recordId: string, messages: StoredM
   }
 }
 
-async function upsertChatNote(state: SyncState, recordId: string, chatId: string): Promise<void> {
+async function upsertChatNote(
+  state: SyncState,
+  parentObject: string,
+  recordId: string,
+  chatId: string,
+): Promise<void> {
   const transcript = getTranscript(state, recordId, chatId);
   if (!transcript || transcript.messages.length === 0) return;
 
   const content = formatTranscript(transcript.messages);
   const createdAt = `${transcript.firstDate}T00:00:00.000000000Z`;
 
-  await attio.upsertNote(recordId, transcript.title, content, createdAt);
+  await attio.upsertNote(recordId, transcript.title, content, createdAt, parentObject);
 }
 
 async function updatePersonStats(state: SyncState, recordId: string): Promise<void> {

@@ -11,6 +11,9 @@ importers:
       incur:
         specifier: ^0.4.5
         version: 0.4.5
+      qrcode-terminal:
+        specifier: ^0.12.0
+        version: 0.12.0
       telegram:
         specifier: ^2.26.22
         version: 2.26.22
@@ -211,6 +214,10 @@ packages:
 
   path-browserify@1.0.1:
     resolution: {integrity: sha512-b7uo2UCUOYZcnF/3ID0lulOJi/bafxa1xPe7ZPsammBSpjSWQkjNxlt635YGS2MiR9GjvuXCtz2emr3jbsz98g==}
+
+  qrcode-terminal@0.12.0:
+    resolution: {integrity: sha512-EXtzRZmC+YGmGlDFbXKxQiMZNwCLEO6BANKXG4iCtSIM0yqc/pappSx3RIKr4r0uh5JsBckOXeKrB3Iz7mdQpQ==}
+    hasBin: true
 
   real-cancellable-promise@1.2.3:
     resolution: {integrity: sha512-hBI5Gy/55VEeeMtImMgEirD7eq5UmqJf1J8dFZtbJZA/3rB0pYFZ7PayMGueb6v4UtUtpKpP+05L0VwyE1hI9Q==}
@@ -475,6 +482,8 @@ snapshots:
   pako@2.1.0: {}
 
   path-browserify@1.0.1: {}
+
+  qrcode-terminal@0.12.0: {}
 
   real-cancellable-promise@1.2.3: {}
 

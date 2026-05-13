@@ -8,6 +8,7 @@
     "dev": "ts-node src/index.ts",
     "start": "node dist/index.js",
     "login:telegram": "node scripts/telegram-login.js",
+    "login:telegram:qr": "node scripts/telegram-login.js --qr",
     "tellatio": "bun src/cli.ts"
   },
   "devDependencies": {
@@ -17,6 +18,7 @@
   },
   "dependencies": {
     "incur": "^0.4.5",
+    "qrcode-terminal": "^0.12.0",
     "telegram": "^2.26.22"
   }
 }

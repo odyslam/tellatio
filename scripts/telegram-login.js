@@ -2,6 +2,9 @@
 /*
  * CLI helper to generate a Telegram session string using GramJS.
  *
+ * QR/passkey-friendly mode:
+ *   pnpm login:telegram -- --qr
+ *
  * Non-interactive mode (reads from .env):
  *   TELEGRAM_PHONE=+30... TELEGRAM_2FA_PASSWORD=... pnpm login:telegram
  *
@@ -18,6 +21,7 @@ const { TelegramClient } = require("telegram");
 const { StringSession } = require("telegram/sessions");
 const { Api } = require("telegram");
 const { computeCheck } = require("telegram/Password");
+const qrcode = require("qrcode-terminal");
 
 // Load .env file manually (no dotenv dependency)
 function loadEnv() {
@@ -55,8 +59,143 @@ function ask(rl, question) {
   });
 }
 
+function parseArgs(argv) {
+  return {
+    help: argv.includes("--help") || argv.includes("-h"),
+    qr: argv.includes("--qr") || process.env.TELEGRAM_LOGIN_MODE === "qr",
+  };
+}
+
+function printHelp() {
+  console.log(`Tellatio Telegram Login Helper
+
+Usage:
+  pnpm login:telegram                    Phone-code login
+  pnpm login:telegram -- --qr            QR login for passkey-enabled accounts
+
+Environment:
+  TELEGRAM_API_ID=...                    Required
+  TELEGRAM_API_HASH=...                  Required
+  TELEGRAM_PHONE=+123...                 Optional for phone-code login
+  TELEGRAM_2FA_PASSWORD=...              Optional if Telegram asks for 2FA password
+  TELEGRAM_LOGIN_MODE=qr                 Optional default to QR mode
+
+QR mode:
+  Scan the printed QR code from an already logged-in Telegram app:
+  Settings -> Devices -> Link Desktop Device.
+`);
+}
+
+function printSession(sessionString) {
+  console.log("\nLogin complete!");
+  console.log("Session string (add as TELEGRAM_SESSION in .env or Railway):\n");
+  console.log(sessionString);
+}
+
+async function runPhoneLogin({ client, apiId, apiHash, rl }) {
+  const phoneNumber =
+    process.env.TELEGRAM_PHONE ||
+    (await ask(rl, "Phone number (with country code, e.g. +1234567890): "));
+
+  if (!phoneNumber) {
+    throw new Error("Phone number is required");
+  }
+
+  console.log(`Phone: ${phoneNumber}`);
+  console.log("\nConnecting to Telegram and sending the login code...");
+
+  await client.connect();
+
+  const sendCodeResult = await client.invoke(
+    new Api.auth.SendCode({
+      phoneNumber,
+      apiId,
+      apiHash,
+      settings: new Api.CodeSettings({}),
+    }),
+  );
+
+  const code = await ask(rl, "Verification code (from Telegram): ");
+
+  try {
+    await client.invoke(
+      new Api.auth.SignIn({
+        phoneNumber,
+        phoneCodeHash: sendCodeResult.phoneCodeHash,
+        phoneCode: code,
+      }),
+    );
+  } catch (error) {
+    if (error?.errorMessage === "SESSION_PASSWORD_NEEDED") {
+      const password =
+        process.env.TELEGRAM_2FA_PASSWORD ||
+        (await ask(rl, "Two-factor password: "));
+
+      if (!password) {
+        throw new Error("Two-factor password required");
+      }
+
+      const passwordInfo = await client.invoke(
+        new Api.account.GetPassword({}),
+      );
+      const srpResult = await computeCheck(passwordInfo, password);
+      await client.invoke(
+        new Api.auth.CheckPassword({ password: srpResult }),
+      );
+    } else {
+      throw error;
+    }
+  }
+}
+
+function qrLoginUrl(token) {
+  return `tg://login?token=${Buffer.from(token).toString("base64url")}`;
+}
+
+async function runQrLogin({ client, rl }) {
+  console.log("\nConnecting to Telegram and generating QR login token...");
+  console.log("Scan from an already logged-in Telegram app:");
+  console.log("Settings -> Devices -> Link Desktop Device\n");
+
+  let renderCount = 0;
+  await client.start({
+    phoneNumber: async () => {
+      const err = new Error("RESTART_AUTH_WITH_QR");
+      err.errorMessage = "RESTART_AUTH_WITH_QR";
+      throw err;
+    },
+    qrCode: async ({ token, expires }) => {
+      renderCount += 1;
+      const url = qrLoginUrl(token);
+      const expiresAt = expires
+        ? new Date(Number(expires) * 1000).toISOString()
+        : "soon";
+
+      console.log(`\nQR login token #${renderCount} expires at ${expiresAt}`);
+      qrcode.generate(url, { small: true });
+      console.log(url);
+      console.log("\nWaiting for approval in Telegram...");
+    },
+    password: async (hint) => {
+      const password = process.env.TELEGRAM_2FA_PASSWORD
+        || await ask(rl, `Two-factor password${hint ? ` (${hint})` : ""}: `);
+      if (!password) throw new Error("Two-factor password required");
+      return password;
+    },
+    onError: (error) => {
+      console.error("[telegram-login] Auth error:", error?.message || error);
+      return false;
+    },
+  });
+}
+
 async function main() {
   loadEnv();
+  const args = parseArgs(process.argv.slice(2));
+  if (args.help) {
+    printHelp();
+    return;
+  }
 
   const rl = createInterface();
   let client = null;
@@ -78,74 +217,20 @@ async function main() {
     console.log(`API ID: ${apiId}`);
     console.log(`API Hash: ${apiHash.slice(0, 6)}...`);
 
-    const phoneNumber =
-      process.env.TELEGRAM_PHONE ||
-      (await ask(rl, "Phone number (with country code, e.g. +1234567890): "));
-
-    if (!phoneNumber) {
-      throw new Error("Phone number is required");
-    }
-
-    console.log(`Phone: ${phoneNumber}`);
-    console.log("\nConnecting to Telegram and sending the login code...");
-
     stringSession = new StringSession("");
     client = new TelegramClient(stringSession, apiId, apiHash, {
       connectionRetries: 5,
     });
 
-    await client.connect();
-
-    const sendCodeResult = await client.invoke(
-      new Api.auth.SendCode({
-        phoneNumber,
-        apiId,
-        apiHash,
-        settings: new Api.CodeSettings({}),
-      }),
-    );
-
-    // Code always requires user input
-    const code = await ask(rl, "Verification code (from Telegram): ");
-
-    try {
-      await client.invoke(
-        new Api.auth.SignIn({
-          phoneNumber,
-          phoneCodeHash: sendCodeResult.phoneCodeHash,
-          phoneCode: code,
-        }),
-      );
-    } catch (error) {
-      if (error?.errorMessage === "SESSION_PASSWORD_NEEDED") {
-        const password =
-          process.env.TELEGRAM_2FA_PASSWORD ||
-          (await ask(rl, "Two-factor password: "));
-
-        if (!password) {
-          throw new Error("Two-factor password required");
-        }
-
-        const passwordInfo = await client.invoke(
-          new Api.account.GetPassword({}),
-        );
-        const srpResult = await computeCheck(passwordInfo, password);
-        await client.invoke(
-          new Api.auth.CheckPassword({ password: srpResult }),
-        );
-      } else {
-        throw error;
-      }
+    if (args.qr) {
+      await runQrLogin({ client, rl });
+    } else {
+      await runPhoneLogin({ client, apiId, apiHash, rl });
     }
 
-    const sessionString = stringSession.save();
-    console.log("\n✅ Login complete!");
-    console.log(
-      "Session string (add as TELEGRAM_SESSION in .env):\n",
-    );
-    console.log(sessionString);
+    printSession(stringSession.save());
   } catch (error) {
-    console.error("\n❌ Failed to generate session string.");
+    console.error("\nFailed to generate session string.");
     if (error instanceof Error) {
       console.error(error.message);
     } else {

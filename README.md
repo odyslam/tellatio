@@ -4,11 +4,11 @@ Tellatio brings your Telegram conversations into [Attio](https://attio.com) — 
 
 ## What it does
 
-**Automatic sync**: Add Telegram chats to a folder called "Attio" in your Telegram app. Tellatio picks them up and creates rich conversation records in your CRM — no manual data entry.
+**Association-based sync**: Tellatio syncs Telegram chats that have an approved `Telegram Association` record in Attio. This lets an external reviewer or Codex automation decide which chats map to which CRM records, while the Railway worker stays deterministic.
 
-- **DMs** appear as Notes on the matching Person record, with the full conversation transcript organized by day
-- **Group chats** create Notes on every participant's Person record, so each contact's record shows all conversations they were part of
-- **New contacts** are automatically created as Person records if they don't already exist in Attio
+- **DMs** can appear as Notes on a mapped Person record, with the conversation transcript organized by day
+- **Group chats** can appear as Notes on a mapped Company record, instead of being copied to every participant
+- **Legacy folder mode** can still auto-create Person records for unmatched DMs or group participants
 
 **CRM fields** updated on every Person record:
 
@@ -19,27 +19,85 @@ Tellatio brings your Telegram conversations into [Attio](https://attio.com) — 
 | Telegram Last Interaction | When you last messaged this person |
 | Telegram Message Count | Total messages exchanged |
 
-**Matching**: Contacts are matched to Attio Person records by phone number or Telegram username (stored in a custom "Telegram" attribute on People).
+**Matching**: The new default source of truth is the `telegram_associations` Attio custom object for chats and the `telegram_identities` object for Telegram user -> Attio Person mappings. Legacy folder sync can still be enabled with `TELLATIO_SYNC_SOURCE=folder`, but ambiguous people now go to identity review instead of being blindly created. The resolver also reads Telegram profile descriptions, so "BD at 0x" or "ecosystem @ symbiotic" can help associate both a person and a group chat with the right Attio record.
 
 ## How to use it
 
-### 1. Choose which chats to track
+### 1. Create the Attio schema
 
-Open Telegram and create a folder called **Attio**. Drag any DM or group chat into it. That's it — those chats will be synced.
+Run the setup script to create the People attributes, the `Telegram Associations` custom object, and the `Telegram Identities` custom object:
 
-To stop tracking a chat, remove it from the folder.
+```bash
+npx ts-node scripts/setup-attio.ts
+```
 
-### 2. Check your Attio records
+### 2. Discover likely associations
 
-After the next sync cycle (every 10 seconds), open any Person record in Attio. You'll see:
+Run the read-only discovery command:
+
+```bash
+bun src/cli.ts discover associations --since 3d --json
+```
+
+Review the proposed `telegram_chat_id`, target type, target name, confidence, and rationale. To run the full resolver locally:
+
+```bash
+bun src/cli.ts associations reconcile --since 3d --limit 100 --json
+```
+
+This checks group titles, recent work-language, and participant profile descriptions/bios. It approves exact company matches with concrete Attio record IDs and leaves ambiguous or missing matches as `needs_review`.
+
+### 3. Reconcile people identities
+
+Run the identity resolver:
+
+```bash
+bun src/cli.ts identities reconcile --since 3d --limit 100 --json
+```
+
+It scans recent DMs and participants in approved work group chats, including their Telegram profile descriptions/bios by default. Safe matches by Telegram user ID, phone, username, exact full name, or a company hint that disambiguates existing candidates are approved. Missing or ambiguous people are written as `needs_review` identity records, so the sync worker does not create duplicate People records.
+
+Useful review commands:
+
+```bash
+bun src/cli.ts associations status --json
+bun src/cli.ts identities status --json
+bun src/cli.ts identities candidates --name "Piotr" --json
+```
+
+Manual approval:
+
+```bash
+bun src/cli.ts identities upsert --telegram-user-id 518976833 --telegram-username pgrzesik --display-name "Piotr Grzesik" --target-record-id <attio_person_record_id> --status approved
+```
+
+### 4. Approve associations in Attio
+
+Create or update `Telegram Association` records with:
+
+- `Telegram Chat ID`
+- `Telegram Chat Title`
+- `Target Object` (`crm_object_slug`) such as `people` or `companies`
+- `Target Record ID` (`crm_record_id`)
+- `Status = approved`
+- `Sync Mode = transcript`
+
+### 5. Check your Attio records
+
+After the next sync cycle, open the mapped Person or Company record in Attio. You'll see:
 
 - A **Note** titled `Telegram · Contact Name` (for DMs) or `Telegram · [Group Name]` (for group chats) containing the full conversation transcript
 - The **Telegram Connection** field showing relationship strength
 - **First/Last Interaction** dates and **Message Count**
 
-### 3. Add Telegram usernames for better matching
+### Legacy folder mode
 
-For contacts who don't share their phone number on Telegram, add their username to the **Telegram** field on their Person record in Attio (lowercase, without the @ symbol).
+To keep the original folder-based behavior:
+
+```bash
+TELLATIO_SYNC_SOURCE=folder
+TELEGRAM_FOLDER_NAME=Attio
+```
 
 ## Agent CLI
 
@@ -79,6 +137,16 @@ pnpm login:telegram
 
 This walks you through logging into Telegram and produces a session string.
 
+For accounts where Telegram pushes passkey-based approval instead of a normal code, use QR login:
+
+```bash
+pnpm login:telegram:qr
+```
+
+Scan the printed QR code from an already logged-in Telegram app via `Settings -> Devices -> Link Desktop Device`. This lets Telegram handle passkey/biometric approval on the logged-in device, then Tellatio receives a normal `TELEGRAM_SESSION` string.
+
+Use separate session strings for local automation and Railway. Do not reuse the same `TELEGRAM_SESSION` in both places, or Telegram can invalidate it with `AUTH_KEY_DUPLICATED`.
+
 ### Configure
 
 ```bash
@@ -92,8 +160,12 @@ TELEGRAM_API_ID=...
 TELEGRAM_API_HASH=...
 TELEGRAM_SESSION=...       # from the login step
 ATTIO_API_KEY=...
-TELEGRAM_FOLDER_NAME=Attio  # or any folder name you prefer
-SYNC_INTERVAL_SECONDS=10
+TELLATIO_SYNC_SOURCE=associations
+TELLATIO_ASSOCIATION_OBJECT=telegram_associations
+TELLATIO_IDENTITY_OBJECT=telegram_identities
+TELLATIO_AUTO_CREATE_PEOPLE=false
+TELLATIO_FOLDER_FALLBACK_ENABLED=false
+SYNC_INTERVAL_MINUTES=15
 DATA_DIR=./data
 ```
 
@@ -133,6 +205,14 @@ chats unread [--limit N]                        Unread inbox
 chats activity <folder> [--since X]             Folder activity digest
 chats status <user>                             Online status
 folders list                                    All folders
+discover associations [--since X] [--limit N]   Dry-run likely Attio chat associations
+associations status                              Association counts and records
+associations upsert --chat-id ...              Create/update an Attio association
+associations reconcile [--since X]              Resolve and approve exact company matches
+identities status                               Identity counts and records
+identities reconcile [--since X]                Resolve Telegram users to Attio People
+identities candidates [--name/--username X]     Search People candidates
+identities upsert --telegram-user-id ...        Create/update a person identity mapping
 
 msg read <chat> [--limit N] [--since X]         Read messages (--until, --date)
 msg send <chat> <text> [--reply-to N]           Send (--silent, --no-preview)

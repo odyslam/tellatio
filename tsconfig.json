@@ -24,6 +24,8 @@
     "src/telegram.ts",
     "src/attio.ts",
     "src/sync.ts",
+    "src/association.ts",
+    "src/identity.ts",
     "src/phone.ts",
     "src/state.ts",
     "src/strength.ts",
