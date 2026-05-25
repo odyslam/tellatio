@@ -5,6 +5,7 @@ import { normalizePhone } from "./phone";
 import {
   loadState, saveState, getChatState, setChatState,
   addInteractions, getInteractions,
+  setRunState,
   appendToTranscript, getTranscript,
   type SyncState, type StoredMessage,
 } from "./state";
@@ -83,6 +84,20 @@ interface SyncChat {
   association?: TelegramAssociation;
 }
 
+async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /**
  * Run one sync cycle. Two phases:
  * 1. Batch-fetch all messages from Telegram (rate-limited by GramJS)
@@ -97,6 +112,12 @@ export async function runSync(config: Config): Promise<void> {
   const syncChats = await getSyncChats(config);
   if (syncChats.length === 0) {
     console.log("[sync] No chats selected for sync.");
+    setRunState(state, "sync", {
+      status: "success",
+      finishedAt: new Date().toISOString(),
+      counts: { selectedChats: 0, fetchedChats: 0, recordWork: 0 },
+    });
+    saveState(config.dataDir, state);
     return;
   }
 
@@ -104,17 +125,23 @@ export async function runSync(config: Config): Promise<void> {
 
   // Phase 1: Batch-fetch from Telegram
   const fetched: ChatFetchResult[] = [];
-  for (const syncChat of syncChats) {
+  for (const [index, syncChat] of syncChats.entries()) {
+    console.log(`[sync] Checking chat ${index + 1}/${syncChats.length}: ${syncChat.chatInfo.title} (${syncChat.chatInfo.idStr})`);
     try {
-      const result = await fetchChat(state, syncChat, me);
+      const result = await fetchChat(state, syncChat, me, config);
       if (result) fetched.push(result);
     } catch (err) {
-      console.error("[sync] Error fetching chat:", err);
+      console.error(`[sync] Error fetching chat ${syncChat.chatInfo.title} (${syncChat.chatInfo.idStr}):`, err);
     }
   }
 
   if (fetched.length === 0) {
     console.log("[sync] No new messages across any chats.");
+    setRunState(state, "sync", {
+      status: "success",
+      finishedAt: new Date().toISOString(),
+      counts: { selectedChats: syncChats.length, fetchedChats: 0, recordWork: 0 },
+    });
     saveState(config.dataDir, state);
     return;
   }
@@ -158,6 +185,11 @@ export async function runSync(config: Config): Promise<void> {
     );
   }
 
+  setRunState(state, "sync", {
+    status: "success",
+    finishedAt: new Date().toISOString(),
+    counts: { selectedChats: syncChats.length, fetchedChats: fetched.length, recordWork: entries.length },
+  });
   saveState(config.dataDir, state);
   console.log("[sync] Cycle complete");
 }
@@ -217,11 +249,16 @@ async function fetchChat(
   state: SyncState,
   syncChat: SyncChat,
   me: { idStr: string; firstName: string },
+  config: Config,
 ): Promise<ChatFetchResult | null> {
   const { peer, chatInfo, association } = syncChat;
 
   const chatState = getChatState(state, chatInfo.idStr);
-  const allMessages = await telegram.getMessages(peer, chatState.lastMessageId);
+  const allMessages = await withTimeout(
+    telegram.getMessages(peer, chatState.lastMessageId),
+    config.chatFetchTimeoutSeconds * 1000,
+    `fetching Telegram messages for ${chatInfo.title} (${chatInfo.idStr})`,
+  );
   if (allMessages.length === 0) return null;
 
   const messages = completedDayMessages(allMessages);
@@ -323,6 +360,7 @@ async function queueGroupWork(
 ): Promise<void> {
   const participants = chat.participants || [];
   const seenRecords = new Set<string>();
+  const autoCreateGroupPeople = config.autoCreatePeople && config.autoCreateGroupPeople;
 
   for (const p of participants) {
     if (p.userIdStr === me.idStr) continue;
@@ -336,7 +374,7 @@ async function queueGroupWork(
       username: p.username,
     }, {
       identityObjectSlug: config.identityObjectSlug,
-      autoCreate: config.autoCreatePeople,
+      autoCreate: autoCreateGroupPeople,
       source: `Group: ${chat.chatInfo.title}`,
     });
 

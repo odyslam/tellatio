@@ -8,11 +8,14 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { Cli, z } from "incur";
 import { TelegramClient } from "telegram";
 import { Logger, LogLevel } from "telegram/extensions/Logger";
 import { StringSession } from "telegram/sessions";
 import { Api } from "telegram";
+import { loadConfig } from "./config";
 import { normalizeAssociationName, suggestAssociation } from "./association";
 import * as attio from "./attio";
 import type { AssociationSuggestion, TelegramAssociation } from "./association";
@@ -22,6 +25,14 @@ import {
   identityUsername,
   type TelegramIdentityInput,
 } from "./identity";
+import { loadState, saveState, setRunState, type RunState, type SyncState } from "./state";
+
+const execFileAsync = promisify(execFile);
+
+process.on("unhandledRejection", (reason) => {
+  if (reason instanceof Error && reason.message === "TIMEOUT") return;
+  throw reason;
+});
 
 // ─── Env & Config ───────────────────────────────────────────────
 
@@ -97,6 +108,13 @@ async function runTelegramAndAttio(operation: () => Promise<void>): Promise<unkn
   }
 }
 
+async function runLocal(operation: () => Promise<void>): Promise<unknown> {
+  commandOutput = undefined;
+  loadEnv();
+  await operation();
+  return commandOutput ?? null;
+}
+
 function commandFlags(values: Record<string, string | number | boolean | undefined>): Record<string, string> {
   const flags: Record<string, string> = {};
   for (const [key, value] of Object.entries(values)) {
@@ -110,6 +128,46 @@ function csv(value: string): string[] {
   return value.split(",").map((item) => item.trim()).filter(Boolean);
 }
 
+function flagEnabled(flags: Record<string, string>, name: string): boolean {
+  return flags[name] === "true";
+}
+
+function dryRun(flags: Record<string, string>): boolean {
+  return flagEnabled(flags, "dry-run") || flagEnabled(flags, "dryRun");
+}
+
+function parseBooleanValue(value: string, name: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  die(`${name} must be true or false`);
+}
+
+function optionalBooleanFlag(flags: Record<string, string>, name: string, fallback: boolean | undefined): boolean | undefined {
+  const raw = flags[name];
+  if (raw === undefined) return fallback;
+  return parseBooleanValue(raw, `--${name}`);
+}
+
+function dataDirFromEnv(): string {
+  return process.env["DATA_DIR"] || path.resolve(__dirname, "..", "data");
+}
+
+function loadLocalState(): { dataDir: string; state: SyncState } {
+  const dataDir = dataDirFromEnv();
+  return { dataDir, state: loadState(dataDir) };
+}
+
+function recordRunState(name: string, run: RunState): void {
+  try {
+    const { dataDir, state } = loadLocalState();
+    setRunState(state, name, run);
+    saveState(dataDir, state);
+  } catch {
+    // Run metadata is useful for doctor, but should not make the primary command fail.
+  }
+}
+
 // ─── Telegram Client ────────────────────────────────────────────
 
 let client: TelegramClient;
@@ -121,9 +179,10 @@ async function connect(): Promise<void> {
 
   client = new TelegramClient(session, apiId, apiHash, {
     connectionRetries: 5,
-    baseLogger: new Logger(LogLevel.ERROR),
+    autoReconnect: false,
+    baseLogger: new Logger(LogLevel.NONE),
   });
-  client.setLogLevel(LogLevel.ERROR);
+  client.setLogLevel(LogLevel.NONE);
   await client.connect();
 }
 
@@ -150,9 +209,62 @@ async function resolveEntity(identifier: string): Promise<any> {
       const id = BigInt(identifier);
       return await client.getEntity(id as any);
     } catch {
+      const dialogEntity = await resolveEntityFromRecentDialogs(identifier);
+      if (dialogEntity) return dialogEntity;
+
+      const folderEntity = await resolveEntityFromDialogFilters(identifier);
+      if (folderEntity) return folderEntity;
+
       die(`Cannot resolve "${identifier}". Use a username, phone (+...), or numeric ID.`);
     }
   }
+}
+
+function entityIdString(entity: unknown): string | undefined {
+  if (entity && typeof entity === "object" && "id" in entity) {
+    return (entity as { id: unknown }).id?.toString();
+  }
+
+  return undefined;
+}
+
+async function resolveEntityFromRecentDialogs(identifier: string): Promise<unknown | undefined> {
+  const dialogs = await client.getDialogs({ limit: 500 });
+
+  for (const dialog of dialogs) {
+    const entity = dialog.entity as unknown;
+    if (entityIdString(entity) === identifier) {
+      return entity;
+    }
+  }
+
+  return undefined;
+}
+
+async function resolveEntityFromDialogFilters(identifier: string): Promise<unknown | undefined> {
+  const filters = await loadDialogFilters();
+  const seen = new Set<string>();
+
+  for (const filter of filters) {
+    const peers = filter instanceof Api.DialogFilter
+      ? [...filter.includePeers, ...filter.excludePeers, ...filter.pinnedPeers]
+      : filter instanceof Api.DialogFilterChatlist
+        ? [...filter.includePeers, ...filter.pinnedPeers]
+        : [];
+
+    for (const peer of peers) {
+      const key = inputPeerKey(peer);
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      try {
+        const entity = await client.getEntity(peer);
+        if (entityIdString(entity) === identifier) return entity;
+      } catch {}
+    }
+  }
+
+  return undefined;
 }
 
 function serializeUser(u: Api.User): Record<string, unknown> {
@@ -181,6 +293,28 @@ function serializeChat(c: any): Record<string, unknown> {
     participantsCount: c.participantsCount,
   };
   return { type: "unknown", id: String((c as any).id) };
+}
+
+function serializeInputPeer(peer: Api.TypeInputPeer): Record<string, unknown> {
+  if (peer instanceof Api.InputPeerSelf) return { type: "self", key: inputPeerKey(peer) };
+  if (peer instanceof Api.InputPeerChat) return {
+    type: "chat",
+    key: inputPeerKey(peer),
+    chatId: peer.chatId.toString(),
+  };
+  if (peer instanceof Api.InputPeerUser) return {
+    type: "user",
+    key: inputPeerKey(peer),
+    userId: peer.userId.toString(),
+    accessHash: peer.accessHash.toString(),
+  };
+  if (peer instanceof Api.InputPeerChannel) return {
+    type: "channel",
+    key: inputPeerKey(peer),
+    channelId: peer.channelId.toString(),
+    accessHash: peer.accessHash.toString(),
+  };
+  return { type: peer.className, key: inputPeerKey(peer) };
 }
 
 function associationChatType(c: unknown): "dm" | "group" | "supergroup" | "channel" | "unknown" {
@@ -321,6 +455,10 @@ function knownCompanyMatch(raw: string, knownCompanies: KnownCompany[]): KnownCo
   }
 
   return undefined;
+}
+
+function knownCompaniesWithRecordIds(knownCompanies: KnownCompany[]): attio.AttioRecordSummary[] {
+  return knownCompanies.filter((company): company is attio.AttioRecordSummary => Boolean(company.recordId));
 }
 
 function loadOwnCompanyNames(): string[] {
@@ -642,6 +780,21 @@ async function cmdChatsInfo(positional: string[]): Promise<void> {
   out(serializeChat(entity));
 }
 
+async function cmdChatsResolve(positional: string[]): Promise<void> {
+  const id = positional[0];
+  if (!id) die("Usage: tellatio chats resolve <chat>");
+
+  const entity = await resolveEntity(id);
+  const inputPeer = await client.getInputEntity(entity) as unknown as Api.TypeInputPeer;
+  out({
+    input: id,
+    chat: serializeChat(entity),
+    canonicalId: entityIdString(entity),
+    displayName: chatDisplayName(entity),
+    inputPeer: serializeInputPeer(inputPeer),
+  });
+}
+
 async function cmdChatsFolder(positional: string[]): Promise<void> {
   const folderName = positional[0];
   if (!folderName) die("Usage: tellatio chats folder <name>");
@@ -770,17 +923,589 @@ async function cmdChatsStatus(positional: string[]): Promise<void> {
 
 // ── folders ─────────────────────────────────────────────────────
 
-async function cmdFoldersList(): Promise<void> {
+interface ResolvedFolderPeer {
+  peer: Api.TypeInputPeer;
+  chat: Record<string, unknown>;
+}
+
+function isDialogFolder(filter: Api.TypeDialogFilter): filter is Api.DialogFilter {
+  return filter instanceof Api.DialogFilter;
+}
+
+function dialogFolderTitle(folder: Api.DialogFilter): string {
+  return folder.title.text;
+}
+
+function serializeFolder(folder: Api.DialogFilter): Record<string, unknown> {
+  return {
+    id: folder.id,
+    title: dialogFolderTitle(folder),
+    peerCount: folder.includePeers.length,
+    pinnedPeerCount: folder.pinnedPeers.length,
+    excludePeerCount: folder.excludePeers.length,
+    contacts: Boolean(folder.contacts),
+    nonContacts: Boolean(folder.nonContacts),
+    groups: Boolean(folder.groups),
+    channels: Boolean(folder.broadcasts),
+    bots: Boolean(folder.bots),
+    excludeMuted: Boolean(folder.excludeMuted),
+    excludeRead: Boolean(folder.excludeRead),
+    excludeArchived: Boolean(folder.excludeArchived),
+    emoticon: folder.emoticon,
+    color: folder.color,
+  };
+}
+
+async function loadDialogFilters(): Promise<Api.TypeDialogFilter[]> {
   const result = await client.invoke(new Api.messages.GetDialogFilters());
-  const folders = result.filters
-    .filter((f): f is Api.DialogFilter => f instanceof Api.DialogFilter)
-    .map((f) => ({
-      id: f.id,
-      title: f.title.text,
-      peerCount: f.includePeers.length,
-      emoticon: f.emoticon,
-    }));
+  return result.filters;
+}
+
+function dialogFolders(filters: Api.TypeDialogFilter[]): Api.DialogFilter[] {
+  return filters.filter(isDialogFolder);
+}
+
+function findDialogFolder(filters: Api.TypeDialogFilter[], name: string): Api.DialogFilter | undefined {
+  return dialogFolders(filters).find((folder) => dialogFolderTitle(folder) === name);
+}
+
+function requireDialogFolder(filters: Api.TypeDialogFilter[], name: string): Api.DialogFilter {
+  const folder = findDialogFolder(filters, name);
+  if (folder) return folder;
+
+  const names = dialogFolders(filters).map(dialogFolderTitle);
+  die(`Folder "${name}" not found. Available: ${names.join(", ")}`);
+}
+
+function nextDialogFolderId(filters: Api.TypeDialogFilter[]): number {
+  const used = new Set<number>();
+  for (const filter of filters) {
+    if (filter instanceof Api.DialogFilter || filter instanceof Api.DialogFilterChatlist) {
+      used.add(filter.id);
+    }
+  }
+
+  for (let id = 2; id <= 255; id += 1) {
+    if (!used.has(id)) return id;
+  }
+
+  die("No available Telegram folder IDs remain");
+}
+
+function folderTitle(title: string): Api.TextWithEntities {
+  return new Api.TextWithEntities({ text: title, entities: [] });
+}
+
+function folderHasBuiltInSource(folder: Api.DialogFilter): boolean {
+  return Boolean(folder.contacts || folder.nonContacts || folder.groups || folder.broadcasts || folder.bots);
+}
+
+function validateDialogFolderName(name: string): void {
+  if (Array.from(name).length > 12) {
+    die("Telegram folder names are limited to 12 characters");
+  }
+}
+
+function cloneDialogFolder(
+  folder: Api.DialogFilter,
+  overrides: Partial<{
+    contacts: boolean;
+    nonContacts: boolean;
+    groups: boolean;
+    broadcasts: boolean;
+    bots: boolean;
+    excludeMuted: boolean;
+    excludeRead: boolean;
+    excludeArchived: boolean;
+    id: number;
+    title: Api.TypeTextWithEntities;
+    emoticon: string;
+    color: number;
+    pinnedPeers: Api.TypeInputPeer[];
+    includePeers: Api.TypeInputPeer[];
+    excludePeers: Api.TypeInputPeer[];
+  }>,
+): Api.DialogFilter {
+  return new Api.DialogFilter({
+    contacts: overrides.contacts ?? folder.contacts,
+    nonContacts: overrides.nonContacts ?? folder.nonContacts,
+    groups: overrides.groups ?? folder.groups,
+    broadcasts: overrides.broadcasts ?? folder.broadcasts,
+    bots: overrides.bots ?? folder.bots,
+    excludeMuted: overrides.excludeMuted ?? folder.excludeMuted,
+    excludeRead: overrides.excludeRead ?? folder.excludeRead,
+    excludeArchived: overrides.excludeArchived ?? folder.excludeArchived,
+    titleNoanimate: folder.titleNoanimate,
+    id: overrides.id ?? folder.id,
+    title: overrides.title ?? folder.title,
+    emoticon: overrides.emoticon ?? folder.emoticon,
+    color: overrides.color ?? folder.color,
+    pinnedPeers: overrides.pinnedPeers ?? folder.pinnedPeers,
+    includePeers: overrides.includePeers ?? folder.includePeers,
+    excludePeers: overrides.excludePeers ?? folder.excludePeers,
+  });
+}
+
+async function saveDialogFolder(folder: Api.DialogFilter): Promise<boolean> {
+  return await client.invoke(new Api.messages.UpdateDialogFilter({
+    id: folder.id,
+    filter: folder,
+  }));
+}
+
+async function resolveFolderPeer(identifier: string): Promise<ResolvedFolderPeer> {
+  const entity = await resolveEntity(identifier);
+  return {
+    peer: await client.getInputEntity(entity) as unknown as Api.TypeInputPeer,
+    chat: serializeChat(entity),
+  };
+}
+
+async function resolveFolderPeers(value: string): Promise<ResolvedFolderPeer[]> {
+  const identifiers = csv(value);
+  if (identifiers.length === 0) die("Expected at least one chat identifier");
+
+  const peers: ResolvedFolderPeer[] = [];
+  for (const identifier of identifiers) {
+    peers.push(await resolveFolderPeer(identifier));
+  }
+  return peers;
+}
+
+function inputPeerKey(peer: Api.TypeInputPeer): string {
+  if (peer instanceof Api.InputPeerSelf) return "self";
+  if (peer instanceof Api.InputPeerChat) return `chat:${peer.chatId.toString()}`;
+  if (peer instanceof Api.InputPeerUser) return `user:${peer.userId.toString()}`;
+  if (peer instanceof Api.InputPeerChannel) return `channel:${peer.channelId.toString()}`;
+  if (peer instanceof Api.InputPeerUserFromMessage) return `user:${peer.userId.toString()}`;
+  if (peer instanceof Api.InputPeerChannelFromMessage) return `channel:${peer.channelId.toString()}`;
+
+  return peer.className;
+}
+
+function folderDryRun(action: string, before: Api.DialogFilter | Api.DialogFilter[], after: Api.DialogFilter | Api.DialogFilter[], extra: Record<string, unknown> = {}): void {
+  const serialize = (folder: Api.DialogFilter) => serializeFolder(folder);
+  out({
+    dryRun: true,
+    action,
+    before: Array.isArray(before) ? before.map(serialize) : serialize(before),
+    after: Array.isArray(after) ? after.map(serialize) : serialize(after),
+    ...extra,
+  });
+}
+
+function sourceFlagOverrides(folder: Api.DialogFilter, flags: Record<string, string>): Partial<{
+  contacts: boolean;
+  nonContacts: boolean;
+  groups: boolean;
+  broadcasts: boolean;
+  bots: boolean;
+  excludeMuted: boolean;
+  excludeRead: boolean;
+  excludeArchived: boolean;
+}> {
+  return {
+    contacts: optionalBooleanFlag(flags, "contacts", folder.contacts),
+    nonContacts: optionalBooleanFlag(flags, "non-contacts", folder.nonContacts),
+    groups: optionalBooleanFlag(flags, "groups", folder.groups),
+    broadcasts: optionalBooleanFlag(flags, "channels", folder.broadcasts),
+    bots: optionalBooleanFlag(flags, "bots", folder.bots),
+    excludeMuted: optionalBooleanFlag(flags, "exclude-muted", folder.excludeMuted),
+    excludeRead: optionalBooleanFlag(flags, "exclude-read", folder.excludeRead),
+    excludeArchived: optionalBooleanFlag(flags, "exclude-archived", folder.excludeArchived),
+  };
+}
+
+function ensureFolderHasSourceOrPeers(folder: Api.DialogFilter): void {
+  if (folder.includePeers.length > 0 || folderHasBuiltInSource(folder)) return;
+  die("Telegram folders need at least one included chat or built-in source. Add a source, add a chat, or delete the folder.");
+}
+
+async function cmdFoldersList(): Promise<void> {
+  const folders = dialogFolders(await loadDialogFilters()).map(serializeFolder);
   out(folders);
+}
+
+async function cmdFoldersCreate(positional: string[], flags: Record<string, string>): Promise<void> {
+  const name = positional[0];
+  if (!name) die("Usage: tellatio folders create <name> [--chats chat1,chat2] [--contacts] [--groups] [--channels] [--bots]");
+  validateDialogFolderName(name);
+
+  const filters = await loadDialogFilters();
+  if (findDialogFolder(filters, name)) die(`Folder "${name}" already exists`);
+
+  const peers = flags["chats"] ? await resolveFolderPeers(flags["chats"]) : [];
+  const hasBuiltInSource = [
+    "contacts",
+    "nonContacts",
+    "groups",
+    "channels",
+    "bots",
+  ].some((flag) => flagEnabled(flags, flag));
+  if (peers.length === 0 && !hasBuiltInSource) {
+    die("Telegram requires a new folder to include at least one chat or built-in source. Use --chats, --contacts, --groups, --channels, or --bots.");
+  }
+
+  const folder = new Api.DialogFilter({
+    contacts: flagEnabled(flags, "contacts") || undefined,
+    nonContacts: flagEnabled(flags, "nonContacts") || undefined,
+    groups: flagEnabled(flags, "groups") || undefined,
+    broadcasts: flagEnabled(flags, "channels") || undefined,
+    bots: flagEnabled(flags, "bots") || undefined,
+    excludeMuted: flagEnabled(flags, "excludeMuted") || undefined,
+    excludeRead: flagEnabled(flags, "excludeRead") || undefined,
+    excludeArchived: flagEnabled(flags, "excludeArchived") || undefined,
+    id: nextDialogFolderId(filters),
+    title: folderTitle(name),
+    emoticon: flags["emoticon"],
+    color: flags["color"] ? parseInt(flags["color"], 10) : undefined,
+    pinnedPeers: [],
+    includePeers: peers.map((peer) => peer.peer),
+    excludePeers: [],
+  });
+
+  if (dryRun(flags)) {
+    out({
+      dryRun: true,
+      action: "folders.create",
+      folder: serializeFolder(folder),
+      includedChats: peers.map((peer) => peer.chat),
+    });
+    return;
+  }
+
+  const ok = await saveDialogFolder(folder);
+  out({
+    created: ok,
+    folder: serializeFolder(folder),
+    includedChats: peers.map((peer) => peer.chat),
+  });
+}
+
+async function cmdFoldersRename(positional: string[]): Promise<void> {
+  const from = positional[0];
+  const to = positional[1];
+  if (!from || !to) die("Usage: tellatio folders rename <old-name> <new-name>");
+  validateDialogFolderName(to);
+
+  const filters = await loadDialogFilters();
+  const folder = requireDialogFolder(filters, from);
+  const existing = findDialogFolder(filters, to);
+  if (existing && existing.id !== folder.id) die(`Folder "${to}" already exists`);
+
+  const updated = cloneDialogFolder(folder, { title: folderTitle(to) });
+  if (positional[2] === "dry-run") {
+    folderDryRun("folders.rename", folder, updated, { from, to });
+    return;
+  }
+
+  const ok = await saveDialogFolder(updated);
+  out({
+    renamed: ok,
+    from,
+    to,
+    folder: serializeFolder(updated),
+  });
+}
+
+async function cmdFoldersDelete(positional: string[]): Promise<void> {
+  const name = positional[0];
+  if (!name) die("Usage: tellatio folders delete <name>");
+
+  const folder = requireDialogFolder(await loadDialogFilters(), name);
+  if (positional[1] === "dry-run") {
+    out({
+      dryRun: true,
+      action: "folders.delete",
+      folder: serializeFolder(folder),
+    });
+    return;
+  }
+
+  const ok = await client.invoke(new Api.messages.UpdateDialogFilter({ id: folder.id }));
+  out({
+    deleted: ok,
+    folder: serializeFolder(folder),
+  });
+}
+
+async function cmdFoldersAdd(positional: string[]): Promise<void> {
+  const name = positional[0];
+  const chat = positional[1];
+  if (!name || !chat) die("Usage: tellatio folders add <folder> <chat|chat1,chat2>");
+
+  const folder = requireDialogFolder(await loadDialogFilters(), name);
+  const peers = await resolveFolderPeers(chat);
+  const existingKeys = new Set(folder.includePeers.map(inputPeerKey));
+  const includePeers = [...folder.includePeers];
+  const added: Record<string, unknown>[] = [];
+  const alreadyPresent: Record<string, unknown>[] = [];
+
+  for (const resolved of peers) {
+    const key = inputPeerKey(resolved.peer);
+    if (existingKeys.has(key)) {
+      alreadyPresent.push(resolved.chat);
+      continue;
+    }
+
+    existingKeys.add(key);
+    includePeers.push(resolved.peer);
+    added.push(resolved.chat);
+  }
+
+  const updated = added.length > 0
+    ? cloneDialogFolder(folder, { includePeers })
+    : folder;
+  if (positional[2] === "dry-run") {
+    folderDryRun("folders.add", folder, updated, { added, alreadyPresent });
+    return;
+  }
+
+  const ok = added.length > 0 ? await saveDialogFolder(updated) : true;
+
+  out({
+    updated: ok,
+    folder: serializeFolder(updated),
+    added,
+    alreadyPresent,
+  });
+}
+
+async function cmdFoldersRemove(positional: string[]): Promise<void> {
+  const name = positional[0];
+  const chat = positional[1];
+  if (!name || !chat) die("Usage: tellatio folders remove <folder> <chat|chat1,chat2>");
+
+  const folder = requireDialogFolder(await loadDialogFilters(), name);
+  const peers = await resolveFolderPeers(chat);
+  const removeKeys = new Set(peers.map((peer) => inputPeerKey(peer.peer)));
+  const existingKeys = new Set(folder.includePeers.map(inputPeerKey));
+  const includePeers = folder.includePeers.filter((peer) => !removeKeys.has(inputPeerKey(peer)));
+  const pinnedPeers = folder.pinnedPeers.filter((peer) => !removeKeys.has(inputPeerKey(peer)));
+  const removed = peers
+    .filter((peer) => existingKeys.has(inputPeerKey(peer.peer)))
+    .map((peer) => peer.chat);
+  const notPresent = peers
+    .filter((peer) => !existingKeys.has(inputPeerKey(peer.peer)))
+    .map((peer) => peer.chat);
+
+  if (removed.length > 0 && includePeers.length === 0 && !folderHasBuiltInSource(folder)) {
+    die("Removing these chats would leave the folder with no included chats or built-in source. Delete the folder instead, or keep at least one chat.");
+  }
+
+  const updated = removed.length > 0
+    ? cloneDialogFolder(folder, { includePeers, pinnedPeers })
+    : folder;
+  if (positional[2] === "dry-run") {
+    folderDryRun("folders.remove", folder, updated, { removed, notPresent });
+    return;
+  }
+
+  const ok = removed.length > 0 ? await saveDialogFolder(updated) : true;
+
+  out({
+    updated: ok,
+    folder: serializeFolder(updated),
+    removed,
+    notPresent,
+  });
+}
+
+async function cmdFoldersPin(positional: string[]): Promise<void> {
+  const name = positional[0];
+  const chat = positional[1];
+  if (!name || !chat) die("Usage: tellatio folders pin <folder> <chat|chat1,chat2>");
+
+  const folder = requireDialogFolder(await loadDialogFilters(), name);
+  const peers = await resolveFolderPeers(chat);
+  const includeKeys = new Set(folder.includePeers.map(inputPeerKey));
+  const pinnedKeys = new Set(folder.pinnedPeers.map(inputPeerKey));
+  const includePeers = [...folder.includePeers];
+  const pinnedPeers = [...folder.pinnedPeers];
+  const pinned: Record<string, unknown>[] = [];
+  const alreadyPinned: Record<string, unknown>[] = [];
+
+  for (const resolved of peers) {
+    const key = inputPeerKey(resolved.peer);
+    if (!includeKeys.has(key)) {
+      includeKeys.add(key);
+      includePeers.push(resolved.peer);
+    }
+    if (pinnedKeys.has(key)) {
+      alreadyPinned.push(resolved.chat);
+      continue;
+    }
+
+    pinnedKeys.add(key);
+    pinnedPeers.push(resolved.peer);
+    pinned.push(resolved.chat);
+  }
+
+  const updated = pinned.length > 0
+    ? cloneDialogFolder(folder, { includePeers, pinnedPeers })
+    : folder;
+  if (positional[2] === "dry-run") {
+    folderDryRun("folders.pin", folder, updated, { pinned, alreadyPinned });
+    return;
+  }
+
+  const ok = pinned.length > 0 ? await saveDialogFolder(updated) : true;
+  out({ updated: ok, folder: serializeFolder(updated), pinned, alreadyPinned });
+}
+
+async function cmdFoldersUnpin(positional: string[]): Promise<void> {
+  const name = positional[0];
+  const chat = positional[1];
+  if (!name || !chat) die("Usage: tellatio folders unpin <folder> <chat|chat1,chat2>");
+
+  const folder = requireDialogFolder(await loadDialogFilters(), name);
+  const peers = await resolveFolderPeers(chat);
+  const unpinKeys = new Set(peers.map((peer) => inputPeerKey(peer.peer)));
+  const existingKeys = new Set(folder.pinnedPeers.map(inputPeerKey));
+  const pinnedPeers = folder.pinnedPeers.filter((peer) => !unpinKeys.has(inputPeerKey(peer)));
+  const unpinned = peers
+    .filter((peer) => existingKeys.has(inputPeerKey(peer.peer)))
+    .map((peer) => peer.chat);
+  const notPinned = peers
+    .filter((peer) => !existingKeys.has(inputPeerKey(peer.peer)))
+    .map((peer) => peer.chat);
+
+  const updated = unpinned.length > 0 ? cloneDialogFolder(folder, { pinnedPeers }) : folder;
+  if (positional[2] === "dry-run") {
+    folderDryRun("folders.unpin", folder, updated, { unpinned, notPinned });
+    return;
+  }
+
+  const ok = unpinned.length > 0 ? await saveDialogFolder(updated) : true;
+  out({ updated: ok, folder: serializeFolder(updated), unpinned, notPinned });
+}
+
+async function cmdFoldersExcludeAdd(positional: string[]): Promise<void> {
+  const name = positional[0];
+  const chat = positional[1];
+  if (!name || !chat) die("Usage: tellatio folders exclude-add <folder> <chat|chat1,chat2>");
+
+  const folder = requireDialogFolder(await loadDialogFilters(), name);
+  if (!folderHasBuiltInSource(folder)) {
+    die("Explicit exclusions are only meaningful on source-based folders. Add a built-in source with folders sources first.");
+  }
+
+  const peers = await resolveFolderPeers(chat);
+  const excludeKeys = new Set(folder.excludePeers.map(inputPeerKey));
+  const excludePeers = [...folder.excludePeers];
+  const removeKeys = new Set(peers.map((peer) => inputPeerKey(peer.peer)));
+  const includePeers = folder.includePeers.filter((peer) => !removeKeys.has(inputPeerKey(peer)));
+  const pinnedPeers = folder.pinnedPeers.filter((peer) => !removeKeys.has(inputPeerKey(peer)));
+  const excluded: Record<string, unknown>[] = [];
+  const alreadyExcluded: Record<string, unknown>[] = [];
+
+  for (const resolved of peers) {
+    const key = inputPeerKey(resolved.peer);
+    if (excludeKeys.has(key)) {
+      alreadyExcluded.push(resolved.chat);
+      continue;
+    }
+
+    excludeKeys.add(key);
+    excludePeers.push(resolved.peer);
+    excluded.push(resolved.chat);
+  }
+
+  const updated = excluded.length > 0
+    ? cloneDialogFolder(folder, { includePeers, pinnedPeers, excludePeers })
+    : folder;
+  if (positional[2] === "dry-run") {
+    folderDryRun("folders.exclude-add", folder, updated, { excluded, alreadyExcluded });
+    return;
+  }
+
+  const ok = excluded.length > 0 ? await saveDialogFolder(updated) : true;
+  out({ updated: ok, folder: serializeFolder(updated), excluded, alreadyExcluded });
+}
+
+async function cmdFoldersExcludeRemove(positional: string[]): Promise<void> {
+  const name = positional[0];
+  const chat = positional[1];
+  if (!name || !chat) die("Usage: tellatio folders exclude-remove <folder> <chat|chat1,chat2>");
+
+  const folder = requireDialogFolder(await loadDialogFilters(), name);
+  const peers = await resolveFolderPeers(chat);
+  const removeKeys = new Set(peers.map((peer) => inputPeerKey(peer.peer)));
+  const existingKeys = new Set(folder.excludePeers.map(inputPeerKey));
+  const excludePeers = folder.excludePeers.filter((peer) => !removeKeys.has(inputPeerKey(peer)));
+  const includedAgain = peers
+    .filter((peer) => existingKeys.has(inputPeerKey(peer.peer)))
+    .map((peer) => peer.chat);
+  const notExcluded = peers
+    .filter((peer) => !existingKeys.has(inputPeerKey(peer.peer)))
+    .map((peer) => peer.chat);
+
+  const updated = includedAgain.length > 0 ? cloneDialogFolder(folder, { excludePeers }) : folder;
+  if (positional[2] === "dry-run") {
+    folderDryRun("folders.exclude-remove", folder, updated, { includedAgain, notExcluded });
+    return;
+  }
+
+  const ok = includedAgain.length > 0 ? await saveDialogFolder(updated) : true;
+  out({ updated: ok, folder: serializeFolder(updated), includedAgain, notExcluded });
+}
+
+async function cmdFoldersSources(positional: string[], flags: Record<string, string>): Promise<void> {
+  const name = positional[0];
+  if (!name) die("Usage: tellatio folders sources <folder> [--groups true|false] [--contacts true|false] ...");
+
+  const folder = requireDialogFolder(await loadDialogFilters(), name);
+  const updated = cloneDialogFolder(folder, sourceFlagOverrides(folder, flags));
+  ensureFolderHasSourceOrPeers(updated);
+
+  if (dryRun(flags)) {
+    folderDryRun("folders.sources", folder, updated);
+    return;
+  }
+
+  const ok = await saveDialogFolder(updated);
+  out({ updated: ok, folder: serializeFolder(updated) });
+}
+
+async function cmdFoldersReorder(positional: string[], flags: Record<string, string>): Promise<void> {
+  const order = csv(positional[0] || "");
+  if (order.length === 0) die("Usage: tellatio folders reorder <folder1,folder2,...>");
+
+  const filters = await loadDialogFilters();
+  const folders = dialogFolders(filters);
+  const byTitle = new Map(folders.map((folder) => [dialogFolderTitle(folder), folder]));
+  const seen = new Set<string>();
+  const selected: Api.DialogFilter[] = [];
+
+  for (const name of order) {
+    if (seen.has(name)) die(`Duplicate folder in reorder list: ${name}`);
+    seen.add(name);
+
+    const folder = byTitle.get(name);
+    if (!folder) {
+      const names = folders.map(dialogFolderTitle);
+      die(`Folder "${name}" not found. Available: ${names.join(", ")}`);
+    }
+    selected.push(folder);
+  }
+
+  const remaining = folders.filter((folder) => !seen.has(dialogFolderTitle(folder)));
+  const nextFolders = [...selected, ...remaining];
+  const nextOrder = nextFolders.map((folder) => folder.id);
+
+  if (dryRun(flags)) {
+    out({
+      dryRun: true,
+      action: "folders.reorder",
+      before: folders.map(serializeFolder),
+      after: nextFolders.map(serializeFolder),
+      order: nextOrder,
+    });
+    return;
+  }
+
+  const ok = await client.invoke(new Api.messages.UpdateDialogFiltersOrder({ order: nextOrder }));
+  out({ updated: ok, order: nextFolders.map(serializeFolder) });
 }
 
 // ── discover ────────────────────────────────────────────────────
@@ -867,6 +1592,18 @@ async function cmdAssociationsUpsert(flags: Record<string, string>): Promise<voi
     lastObservedAt: new Date().toISOString(),
   };
 
+  if (dryRun(flags)) {
+    const existing = await attio.findTelegramAssociation(objectSlug, association.telegramChatId);
+    out({
+      dryRun: true,
+      action: "associations.upsert",
+      object: objectSlug,
+      existingRecordId: existing?.recordId,
+      association,
+    });
+    return;
+  }
+
   const recordId = await attio.upsertTelegramAssociation(objectSlug, association);
   out({ recordId, object: objectSlug, association });
 }
@@ -879,6 +1616,7 @@ async function cmdAssociationsReconcile(flags: Record<string, string>): Promise<
   const includeProfileDescriptions = flags["include-profile-descriptions"] !== "false";
   const profileParticipantLimit = numFlag(flags, "profile-participant-limit", 30);
   const companyLimit = numFlag(flags, "company-limit", 500);
+  const isDryRun = dryRun(flags);
 
   if (!Number.isFinite(minConfidence) || minConfidence < 0 || minConfidence > 1) {
     die("--min-confidence must be between 0 and 1");
@@ -904,6 +1642,7 @@ async function cmdAssociationsReconcile(flags: Record<string, string>): Promise<
     needsReview: [] as Array<Record<string, unknown>>,
     skippedApproved: [] as Array<Record<string, unknown>>,
     ignored: [] as Array<Record<string, unknown>>,
+    wouldUpsert: [] as Array<TelegramAssociation>,
   };
 
   for (const originalSuggestion of suggestions) {
@@ -966,7 +1705,9 @@ async function cmdAssociationsReconcile(flags: Record<string, string>): Promise<
           profileSignals,
         });
       } else {
-        const resolution = await attio.resolveCompanyByName(targetName);
+        const resolution = await attio.resolveCompanyByName(targetName, {
+          knownCompanies: knownCompaniesWithRecordIds(knownCompanies),
+        });
         resolutionReason = resolution.reason;
         if (targetName !== suggestion.suggestedTargetName) {
           resolutionReason = `alias ${suggestion.suggestedTargetName} -> ${targetName}; ${resolutionReason}`;
@@ -1008,7 +1749,7 @@ async function cmdAssociationsReconcile(flags: Record<string, string>): Promise<
       });
     }
 
-    await attio.upsertTelegramAssociation(objectSlug, {
+    const association: TelegramAssociation = {
       telegramChatId: suggestion.telegramChatId,
       telegramChatTitle: suggestion.telegramChatTitle,
       telegramChatType: suggestion.telegramChatType,
@@ -1020,15 +1761,33 @@ async function cmdAssociationsReconcile(flags: Record<string, string>): Promise<
       reason: [...suggestion.reasons, resolutionReason].filter(Boolean).join("; "),
       syncMode: suggestion.syncMode,
       lastObservedAt: suggestion.lastMessageAt || new Date().toISOString(),
-    });
+    };
+
+    result.wouldUpsert.push(association);
+    if (!isDryRun) await attio.upsertTelegramAssociation(objectSlug, association);
   }
 
+  const counts = {
+    approved: result.approved.length,
+    needsReview: result.needsReview.length,
+    skippedApproved: result.skippedApproved.length,
+    ignored: result.ignored.length,
+    wouldUpsert: result.wouldUpsert.length,
+  };
+  recordRunState("associationsReconcile", {
+    status: isDryRun ? "dry_run" : "success",
+    finishedAt: new Date().toISOString(),
+    counts,
+  });
+
   out({
+    dryRun: isDryRun || undefined,
     counts: {
       approved: result.approved.length,
       needsReview: result.needsReview.length,
       skippedApproved: result.skippedApproved.length,
       ignored: result.ignored.length,
+      wouldUpsert: result.wouldUpsert.length,
     },
     ...result,
   });
@@ -1171,13 +1930,16 @@ async function collectIdentityInputs(flags: Record<string, string>): Promise<Tel
 async function cmdIdentitiesReconcile(flags: Record<string, string>): Promise<void> {
   const identityObjectSlug = flags["identity-object"] || process.env["TELLATIO_IDENTITY_OBJECT"] || "telegram_identities";
   const inputs = await collectIdentityInputs(flags);
+  const isDryRun = dryRun(flags);
   const result = {
     approved: [] as Array<Record<string, unknown>>,
     needsReview: [] as Array<Record<string, unknown>>,
   };
 
   for (const input of inputs) {
-    const reconciliation = await attio.reconcileTelegramIdentity(identityObjectSlug, input);
+    const reconciliation = isDryRun
+      ? await resolveIdentityDryRun(identityObjectSlug, input)
+      : await attio.reconcileTelegramIdentity(identityObjectSlug, input);
     const row = {
       telegramUserId: input.telegramUserId,
       telegramUsername: identityUsername(input),
@@ -1200,13 +1962,50 @@ async function cmdIdentitiesReconcile(flags: Record<string, string>): Promise<vo
     }
   }
 
+  const counts = {
+    approved: result.approved.length,
+    needsReview: result.needsReview.length,
+  };
+  recordRunState("identitiesReconcile", {
+    status: isDryRun ? "dry_run" : "success",
+    finishedAt: new Date().toISOString(),
+    counts,
+  });
+
   out({
-    counts: {
-      approved: result.approved.length,
-      needsReview: result.needsReview.length,
-    },
+    dryRun: isDryRun || undefined,
+    counts,
     ...result,
   });
+}
+
+async function resolveIdentityDryRun(
+  identityObjectSlug: string,
+  input: TelegramIdentityInput,
+): Promise<{
+  identityRecordId?: string;
+  resolution: attio.PersonResolution;
+  identity: {
+    status: TelegramAssociation["status"];
+    confidence: number;
+    reason: string;
+    targetRecordId: string;
+    targetName?: string;
+  };
+}> {
+  const resolution = await attio.resolvePersonIdentity(input, identityObjectSlug);
+  const displayName = identityDisplayName(input);
+  return {
+    identityRecordId: undefined,
+    resolution,
+    identity: {
+      status: resolution.status === "resolved" ? "approved" : "needs_review",
+      confidence: resolution.confidence,
+      reason: [input.source, resolution.reason].filter(Boolean).join("; "),
+      targetRecordId: resolution.record?.recordId || "",
+      targetName: resolution.record?.name || displayName,
+    },
+  };
 }
 
 async function cmdIdentitiesCandidates(flags: Record<string, string>): Promise<void> {
@@ -1249,7 +2048,7 @@ async function cmdIdentitiesUpsert(flags: Record<string, string>): Promise<void>
   }
 
   const target = targetRecordId ? await attio.getPersonSummary(targetRecordId) : null;
-  const recordId = await attio.upsertTelegramIdentity(identityObjectSlug, {
+  const identity = {
     telegramUserId,
     telegramUsername: flags["telegram-username"],
     telegramDisplayName: displayName,
@@ -1262,7 +2061,21 @@ async function cmdIdentitiesUpsert(flags: Record<string, string>): Promise<void>
     confidence: flags["confidence"] ? Number.parseFloat(flags["confidence"]) : (status === "approved" ? 1 : 0.5),
     reason: flags["reason"] || "manual identity mapping",
     lastObservedAt: new Date().toISOString(),
-  });
+  };
+
+  if (dryRun(flags)) {
+    out({
+      dryRun: true,
+      action: "identities.upsert",
+      identityObject: identityObjectSlug,
+      identity,
+      target,
+      wouldUpdatePerson: status === "approved" && Boolean(targetRecordId),
+    });
+    return;
+  }
+
+  const recordId = await attio.upsertTelegramIdentity(identityObjectSlug, identity);
 
   if (status === "approved" && targetRecordId) {
     await attio.updatePersonTelegramIdentity(targetRecordId, {
@@ -1893,6 +2706,248 @@ async function cmdDraftClear(positional: string[]): Promise<void> {
   out({ chatId, draft: null });
 }
 
+// ── doctor ──────────────────────────────────────────────────────
+
+type CheckStatus = "pass" | "fail" | "warn" | "skip";
+
+interface DoctorCheck {
+  name: string;
+  status: CheckStatus;
+  detail?: string;
+  data?: Record<string, unknown>;
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function envPresence(): Record<string, boolean> {
+  return {
+    TELEGRAM_API_ID: Boolean(process.env["TELEGRAM_API_ID"]),
+    TELEGRAM_API_HASH: Boolean(process.env["TELEGRAM_API_HASH"]),
+    TELEGRAM_SESSION: Boolean(process.env["TELEGRAM_SESSION"]),
+    ATTIO_API_KEY: Boolean(process.env["ATTIO_API_KEY"]),
+    DATA_DIR: Boolean(process.env["DATA_DIR"]),
+  };
+}
+
+function envCheck(): DoctorCheck {
+  try {
+    const config = loadConfig();
+    return {
+      name: "env",
+      status: "pass",
+      detail: "required environment is present",
+      data: {
+        syncSource: config.syncSource,
+        folderName: config.folderName,
+        associationObject: config.associationObjectSlug,
+        identityObject: config.identityObjectSlug,
+        folderFallbackEnabled: config.folderFallbackEnabled,
+        autoCreatePeople: config.autoCreatePeople,
+        syncIntervalSeconds: config.syncIntervalSeconds,
+        discoveryDialogLimit: config.discoveryDialogLimit,
+        dataDir: config.dataDir,
+      },
+    };
+  } catch (err) {
+    return {
+      name: "env",
+      status: "fail",
+      detail: errorMessage(err),
+      data: envPresence(),
+    };
+  }
+}
+
+async function telegramDoctorCheck(): Promise<DoctorCheck> {
+  try {
+    await connect();
+    const me = await client.getMe() as Api.User;
+    const filters = dialogFolders(await loadDialogFilters());
+    return {
+      name: "telegram",
+      status: "pass",
+      detail: "connected and fetched dialog filters",
+      data: {
+        id: me.id.toString(),
+        username: me.username,
+        displayName: chatDisplayName(me),
+        folderCount: filters.length,
+      },
+    };
+  } catch (err) {
+    return {
+      name: "telegram",
+      status: "fail",
+      detail: errorMessage(err),
+    };
+  } finally {
+    await disconnect();
+  }
+}
+
+async function attioDoctorCheck(limit: number): Promise<DoctorCheck> {
+  try {
+    attio.initAttio(requireEnv("ATTIO_API_KEY"));
+    const associationObject = process.env["TELLATIO_ASSOCIATION_OBJECT"] || "telegram_associations";
+    const identityObject = process.env["TELLATIO_IDENTITY_OBJECT"] || "telegram_identities";
+    const associations = await attio.listTelegramAssociations(associationObject, limit);
+    const identities = await attio.listTelegramIdentities(identityObject, limit);
+    const associationCounts = associations.reduce<Record<string, number>>((acc, association) => {
+      acc[association.status] = (acc[association.status] || 0) + 1;
+      return acc;
+    }, {});
+    const identityCounts = identities.reduce<Record<string, number>>((acc, identity) => {
+      acc[identity.status] = (acc[identity.status] || 0) + 1;
+      return acc;
+    }, {});
+
+    return {
+      name: "attio",
+      status: "pass",
+      detail: "queried association and identity objects",
+      data: {
+        associationObject,
+        identityObject,
+        associationCounts,
+        identityCounts,
+      },
+    };
+  } catch (err) {
+    return {
+      name: "attio",
+      status: "fail",
+      detail: errorMessage(err),
+    };
+  }
+}
+
+function findRailwayTellatio(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object") return undefined;
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findRailwayTellatio(item);
+      if (found) return found;
+    }
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const text = [
+    record.name,
+    record.serviceName,
+    record.service,
+    record.id,
+  ].filter((item): item is string => typeof item === "string").join(" ").toLowerCase();
+
+  if (text.includes("tellatio")) return record;
+
+  for (const child of Object.values(record)) {
+    const found = findRailwayTellatio(child);
+    if (found) return found;
+  }
+
+  return undefined;
+}
+
+async function railwayDoctorCheck(): Promise<DoctorCheck> {
+  try {
+    const { stdout } = await execFileAsync("railway", ["service", "status", "--all", "--json"], {
+      encoding: "utf8",
+      timeout: 10000,
+      maxBuffer: 1024 * 1024,
+    });
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(stdout);
+    } catch {
+      return {
+        name: "railway",
+        status: "warn",
+        detail: "railway CLI returned non-JSON status output",
+        data: { output: stdout.slice(0, 1000) },
+      };
+    }
+
+    const tellatio = findRailwayTellatio(parsed);
+    return {
+      name: "railway",
+      status: tellatio ? "pass" : "warn",
+      detail: tellatio ? "found tellatio service in Railway status" : "railway status succeeded but no tellatio service was identified",
+      data: tellatio ? { service: tellatio } : { status: parsed as Record<string, unknown> },
+    };
+  } catch (err) {
+    return {
+      name: "railway",
+      status: "warn",
+      detail: `railway service status unavailable: ${errorMessage(err)}`,
+    };
+  }
+}
+
+function stateDoctorCheck(): DoctorCheck {
+  try {
+    const { dataDir, state } = loadLocalState();
+    const chatStates = Object.entries(state.chats || {});
+    const latestChat = chatStates
+      .map(([chatId, chat]) => ({ chatId, ...chat }))
+      .sort((a, b) => b.lastSyncedDate.localeCompare(a.lastSyncedDate) || b.lastMessageId - a.lastMessageId)[0];
+
+    return {
+      name: "state",
+      status: "pass",
+      detail: "loaded local sync state",
+      data: {
+        dataDir,
+        chatCount: chatStates.length,
+        latestChat,
+        runs: state.runs || {},
+      },
+    };
+  } catch (err) {
+    return {
+      name: "state",
+      status: "warn",
+      detail: errorMessage(err),
+    };
+  }
+}
+
+async function cmdDoctor(flags: Record<string, string>): Promise<void> {
+  const checks: DoctorCheck[] = [envCheck()];
+  const limit = numFlag(flags, "limit", 100);
+
+  if (!flagEnabled(flags, "skip-telegram")) {
+    checks.push(await telegramDoctorCheck());
+  } else {
+    checks.push({ name: "telegram", status: "skip" });
+  }
+
+  if (!flagEnabled(flags, "skip-attio")) {
+    checks.push(await attioDoctorCheck(limit));
+  } else {
+    checks.push({ name: "attio", status: "skip" });
+  }
+
+  if (!flagEnabled(flags, "skip-railway")) {
+    checks.push(await railwayDoctorCheck());
+  } else {
+    checks.push({ name: "railway", status: "skip" });
+  }
+
+  checks.push(stateDoctorCheck());
+
+  const overall = checks.some((check) => check.status === "fail")
+    ? "fail"
+    : checks.some((check) => check.status === "warn")
+      ? "warn"
+      : "pass";
+
+  out({ overall, checks });
+}
+
 // ── incur CLI ───────────────────────────────────────────────────
 
 const chats = Cli.create("chats", { description: "Inspect Telegram chats and folders" })
@@ -1911,6 +2966,11 @@ const chats = Cli.create("chats", { description: "Inspect Telegram chats and fol
     description: "Get chat details",
     args: z.object({ chat: z.string().describe("Username, phone, or numeric chat ID") }),
     run: (c) => runTelegram(() => cmdChatsInfo([c.args.chat])),
+  })
+  .command("resolve", {
+    description: "Resolve a chat identifier to canonical Telegram IDs",
+    args: z.object({ chat: z.string().describe("Username, phone, or numeric chat ID") }),
+    run: (c) => runTelegram(() => cmdChatsResolve([c.args.chat])),
   })
   .command("folder", {
     description: "List chats in a Telegram folder",
@@ -1934,10 +2994,130 @@ const chats = Cli.create("chats", { description: "Inspect Telegram chats and fol
     run: (c) => runTelegram(() => cmdChatsStatus([c.args.user])),
   });
 
-const folders = Cli.create("folders", { description: "Inspect Telegram folders" })
+const folders = Cli.create("folders", { description: "Inspect and manage Telegram folders" })
   .command("list", {
     description: "List all folders",
     run: () => runTelegram(cmdFoldersList),
+  })
+  .command("create", {
+    description: "Create a Telegram folder",
+    args: z.object({ name: z.string().describe("Folder name") }),
+    options: z.object({
+      chats: z.string().optional().describe("Comma-separated chat identifiers to include"),
+      contacts: z.boolean().default(false).describe("Include contacts"),
+      nonContacts: z.boolean().default(false).describe("Include non-contacts"),
+      groups: z.boolean().default(false).describe("Include group chats"),
+      channels: z.boolean().default(false).describe("Include channels"),
+      bots: z.boolean().default(false).describe("Include bots"),
+      excludeMuted: z.boolean().default(false).describe("Exclude muted chats"),
+      excludeRead: z.boolean().default(false).describe("Exclude read chats"),
+      excludeArchived: z.boolean().default(false).describe("Exclude archived chats"),
+      emoticon: z.string().optional().describe("Folder emoji"),
+      color: z.number().optional().describe("Telegram folder color ID"),
+      dryRun: z.boolean().default(false).describe("Preview without changing Telegram"),
+    }),
+    run: (c) => runTelegram(() => cmdFoldersCreate([c.args.name], commandFlags(c.options))),
+  })
+  .command("rename", {
+    description: "Rename a Telegram folder",
+    args: z.object({
+      from: z.string().describe("Current folder name"),
+      to: z.string().describe("New folder name"),
+    }),
+    options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
+    run: (c) => runTelegram(() => cmdFoldersRename([c.args.from, c.args.to, c.options.dryRun ? "dry-run" : ""])),
+  })
+  .command("delete", {
+    description: "Delete a Telegram folder",
+    args: z.object({ name: z.string().describe("Folder name") }),
+    options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
+    run: (c) => runTelegram(() => cmdFoldersDelete([c.args.name, c.options.dryRun ? "dry-run" : ""])),
+  })
+  .command("add", {
+    description: "Add chats to a Telegram folder",
+    args: z.object({
+      folder: z.string().describe("Folder name"),
+      chat: z.string().describe("Chat identifier, or comma-separated chat identifiers"),
+    }),
+    options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
+    run: (c) => runTelegram(() => cmdFoldersAdd([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
+  })
+  .command("remove", {
+    description: "Remove chats from a Telegram folder",
+    args: z.object({
+      folder: z.string().describe("Folder name"),
+      chat: z.string().describe("Chat identifier, or comma-separated chat identifiers"),
+    }),
+    options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
+    run: (c) => runTelegram(() => cmdFoldersRemove([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
+  })
+  .command("pin", {
+    description: "Pin chats inside a Telegram folder",
+    args: z.object({
+      folder: z.string().describe("Folder name"),
+      chat: z.string().describe("Chat identifier, or comma-separated chat identifiers"),
+    }),
+    options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
+    run: (c) => runTelegram(() => cmdFoldersPin([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
+  })
+  .command("unpin", {
+    description: "Unpin chats inside a Telegram folder",
+    args: z.object({
+      folder: z.string().describe("Folder name"),
+      chat: z.string().describe("Chat identifier, or comma-separated chat identifiers"),
+    }),
+    options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
+    run: (c) => runTelegram(() => cmdFoldersUnpin([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
+  })
+  .command("exclude-add", {
+    description: "Explicitly exclude chats from a source-based Telegram folder",
+    args: z.object({
+      folder: z.string().describe("Folder name"),
+      chat: z.string().describe("Chat identifier, or comma-separated chat identifiers"),
+    }),
+    options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
+    run: (c) => runTelegram(() => cmdFoldersExcludeAdd([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
+  })
+  .command("exclude-remove", {
+    description: "Remove chats from a folder's explicit exclusions",
+    args: z.object({
+      folder: z.string().describe("Folder name"),
+      chat: z.string().describe("Chat identifier, or comma-separated chat identifiers"),
+    }),
+    options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
+    run: (c) => runTelegram(() => cmdFoldersExcludeRemove([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
+  })
+  .command("sources", {
+    description: "Edit built-in folder sources and exclusions",
+    args: z.object({ folder: z.string().describe("Folder name") }),
+    options: z.object({
+      contacts: z.string().optional().describe("true/false"),
+      nonContacts: z.string().optional().describe("true/false"),
+      groups: z.string().optional().describe("true/false"),
+      channels: z.string().optional().describe("true/false"),
+      bots: z.string().optional().describe("true/false"),
+      excludeMuted: z.string().optional().describe("true/false"),
+      excludeRead: z.string().optional().describe("true/false"),
+      excludeArchived: z.string().optional().describe("true/false"),
+      dryRun: z.boolean().default(false).describe("Preview without changing Telegram"),
+    }),
+    run: (c) => runTelegram(() => cmdFoldersSources([c.args.folder], commandFlags({
+      contacts: c.options.contacts,
+      "non-contacts": c.options.nonContacts,
+      groups: c.options.groups,
+      channels: c.options.channels,
+      bots: c.options.bots,
+      "exclude-muted": c.options.excludeMuted,
+      "exclude-read": c.options.excludeRead,
+      "exclude-archived": c.options.excludeArchived,
+      "dry-run": c.options.dryRun,
+    }))),
+  })
+  .command("reorder", {
+    description: "Move named folders to the front in the given order",
+    args: z.object({ order: z.string().describe("Comma-separated folder names in desired leading order") }),
+    options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
+    run: (c) => runTelegram(() => cmdFoldersReorder([c.args.order], commandFlags({ "dry-run": c.options.dryRun }))),
   });
 
 const discover = Cli.create("discover", { description: "Find likely Telegram to Attio associations" })
@@ -1981,6 +3161,7 @@ const associations = Cli.create("associations", { description: "Manage Attio Tel
       confidence: z.number().default(0).describe("Confidence from 0 to 1"),
       reason: z.string().default("").describe("Short rationale for the association"),
       syncMode: z.string().default("transcript").describe("transcript, summary, or stats"),
+      dryRun: z.boolean().default(false).describe("Preview without writing to Attio"),
     }),
     run: (c) => runAttio(() => cmdAssociationsUpsert(commandFlags({
       object: c.options.object,
@@ -1994,6 +3175,7 @@ const associations = Cli.create("associations", { description: "Manage Attio Tel
       confidence: c.options.confidence,
       reason: c.options.reason,
       "sync-mode": c.options.syncMode,
+      "dry-run": c.options.dryRun,
     }))),
   })
   .command("reconcile", {
@@ -2006,6 +3188,7 @@ const associations = Cli.create("associations", { description: "Manage Attio Tel
       includeProfileDescriptions: z.boolean().default(true).describe("Use Telegram profile descriptions/bios from group participants as company signals"),
       profileParticipantLimit: z.number().default(30).describe("Maximum group participants to inspect for profile company hints"),
       companyLimit: z.number().default(500).describe("Maximum Attio companies to load for profile hint matching"),
+      dryRun: z.boolean().default(false).describe("Preview without writing association records"),
     }),
     run: (c) => runTelegramAndAttio(() => cmdAssociationsReconcile(commandFlags({
       object: c.options.object,
@@ -2015,6 +3198,7 @@ const associations = Cli.create("associations", { description: "Manage Attio Tel
       "include-profile-descriptions": c.options.includeProfileDescriptions,
       "profile-participant-limit": c.options.profileParticipantLimit,
       "company-limit": c.options.companyLimit,
+      "dry-run": c.options.dryRun,
     }))),
   });
 
@@ -2041,6 +3225,7 @@ const identities = Cli.create("identities", { description: "Resolve Telegram use
       includeProfileDescriptions: z.boolean().default(true).describe("Fetch Telegram profile descriptions/bios and infer company hints"),
       participantLimit: z.number().default(50).describe("Maximum recent senders or fallback participants per approved group"),
       companyLimit: z.number().default(500).describe("Maximum Attio companies to load for profile hint matching"),
+      dryRun: z.boolean().default(false).describe("Preview without writing identity records or People updates"),
     }),
     run: (c) => runTelegramAndAttio(() => cmdIdentitiesReconcile(commandFlags({
       object: c.options.object,
@@ -2051,6 +3236,7 @@ const identities = Cli.create("identities", { description: "Resolve Telegram use
       "include-profile-descriptions": c.options.includeProfileDescriptions,
       "participant-limit": c.options.participantLimit,
       "company-limit": c.options.companyLimit,
+      "dry-run": c.options.dryRun,
     }))),
   })
   .command("candidates", {
@@ -2083,6 +3269,7 @@ const identities = Cli.create("identities", { description: "Resolve Telegram use
       status: z.string().default("approved").describe("suggested, approved, ignored, or needs_review"),
       confidence: z.number().optional().describe("Confidence from 0 to 1"),
       reason: z.string().default("manual identity mapping").describe("Short mapping rationale"),
+      dryRun: z.boolean().default(false).describe("Preview without writing to Attio"),
     }),
     run: (c) => runAttio(() => cmdIdentitiesUpsert(commandFlags({
       "identity-object": c.options.identityObject,
@@ -2097,6 +3284,7 @@ const identities = Cli.create("identities", { description: "Resolve Telegram use
       status: c.options.status,
       confidence: c.options.confidence,
       reason: c.options.reason,
+      "dry-run": c.options.dryRun,
     }))),
   });
 
@@ -2390,6 +3578,21 @@ const cli = Cli.create("tellatio", {
   .command("me", {
     description: "Get your profile info",
     run: () => runTelegram(cmdMe),
+  })
+  .command("doctor", {
+    description: "Check Telegram, Attio, Railway, and local sync state",
+    options: z.object({
+      skipTelegram: z.boolean().default(false).describe("Skip Telegram session and folder checks"),
+      skipAttio: z.boolean().default(false).describe("Skip Attio association and identity checks"),
+      skipRailway: z.boolean().default(false).describe("Skip Railway service status checks"),
+      limit: z.number().default(100).describe("Maximum Attio records to inspect for counts"),
+    }),
+    run: (c) => runLocal(() => cmdDoctor(commandFlags({
+      "skip-telegram": c.options.skipTelegram,
+      "skip-attio": c.options.skipAttio,
+      "skip-railway": c.options.skipRailway,
+      limit: c.options.limit,
+    }))),
   })
   .command(chats)
   .command(folders)

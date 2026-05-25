@@ -5,6 +5,10 @@ import { initAttio } from "./attio";
 import * as telegram from "./telegram";
 import { runSync } from "./sync";
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // Load .env from project root (no dotenv dependency)
 function loadEnv(): void {
   try {
@@ -38,29 +42,32 @@ async function main(): Promise<void> {
   // Run once immediately
   await runSync(config);
 
-  // Then run on interval
+  // Then run serially on interval. A sync cycle can run longer than expected if
+  // Telegram is slow, so avoid overlapping workers in one process.
   const intervalMs = config.syncIntervalSeconds * 1000;
-  console.log(`[main] Next sync in ${config.syncIntervalSeconds}s`);
+  let shuttingDown = false;
 
-  const timer = setInterval(async () => {
-    try {
-      await runSync(config);
-    } catch (err) {
-      console.error("[main] Sync error:", err);
-    }
-    console.log(`[main] Next sync in ${config.syncIntervalSeconds}s`);
-  }, intervalMs);
-
-  // Graceful shutdown
   const shutdown = async () => {
+    shuttingDown = true;
     console.log("\n[main] Shutting down...");
-    clearInterval(timer);
     await telegram.disconnect();
     process.exit(0);
   };
 
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+
+  while (!shuttingDown) {
+    console.log(`[main] Next sync in ${config.syncIntervalSeconds}s`);
+    await sleep(intervalMs);
+    if (shuttingDown) break;
+
+    try {
+      await runSync(config);
+    } catch (err) {
+      console.error("[main] Sync error:", err);
+    }
+  }
 }
 
 main().catch((err) => {

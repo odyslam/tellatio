@@ -9,6 +9,8 @@ export interface Config {
   identityObjectSlug: string;
   folderFallbackEnabled: boolean;
   autoCreatePeople: boolean;
+  autoCreateGroupPeople: boolean;
+  chatFetchTimeoutSeconds: number;
   syncIntervalSeconds: number;
   discoveryDialogLimit: number;
   dataDir: string;
@@ -75,6 +77,8 @@ export function loadConfig(): Config {
     identityObjectSlug: process.env["TELLATIO_IDENTITY_OBJECT"] || "telegram_identities",
     folderFallbackEnabled: optionalBool("TELLATIO_FOLDER_FALLBACK_ENABLED", false),
     autoCreatePeople: optionalBool("TELLATIO_AUTO_CREATE_PEOPLE", false),
+    autoCreateGroupPeople: optionalBool("TELLATIO_AUTO_CREATE_GROUP_PEOPLE", false),
+    chatFetchTimeoutSeconds: optionalInt("TELLATIO_CHAT_FETCH_TIMEOUT_SECONDS", 30),
     syncIntervalSeconds: loadSyncIntervalSeconds(),
     discoveryDialogLimit: optionalInt("TELLATIO_DISCOVERY_DIALOG_LIMIT", 200),
     dataDir: process.env["DATA_DIR"] || "/data",

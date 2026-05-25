@@ -3,13 +3,16 @@
   "description": "Telegram → Attio sync service",
   "private": true,
   "version": "0.1.0",
+  "bin": {
+    "tellatio": "./bin/tellatio"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "ts-node src/index.ts",
     "start": "node dist/index.js",
     "login:telegram": "node scripts/telegram-login.js",
     "login:telegram:qr": "node scripts/telegram-login.js --qr",
-    "tellatio": "bun src/cli.ts"
+    "tellatio": "bin/tellatio"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

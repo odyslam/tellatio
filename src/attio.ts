@@ -21,6 +21,10 @@ export function initAttio(key: string): void {
   apiKey = key;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export class AttioApiError extends Error {
   constructor(
     public readonly status: number,
@@ -32,21 +36,44 @@ export class AttioApiError extends Error {
 }
 
 async function attioFetch(path: string, options: RequestInit = {}): Promise<Response> {
-  const res = await fetch(`${BASE_URL}${path}`, {
-    ...options,
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      ...options.headers,
-    },
-  });
+  const maxAttempts = 5;
+  let attempt = 0;
+  let lastError: unknown;
 
-  if (!res.ok) {
-    const body = await res.text();
-    throw new AttioApiError(res.status, path, body);
+  while (attempt < maxAttempts) {
+    attempt += 1;
+    try {
+      const res = await fetch(`${BASE_URL}${path}`, {
+        ...options,
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          ...options.headers,
+        },
+      });
+
+      if (res.ok) return res;
+
+      const body = await res.text();
+      const shouldRetry = res.status === 429 || res.status === 502 || res.status === 503 || res.status === 504;
+      if (!shouldRetry || attempt >= maxAttempts) {
+        throw new AttioApiError(res.status, path, body);
+      }
+
+      const retryAfter = res.headers.get("retry-after");
+      const retryAfterMs = retryAfter ? Number.parseFloat(retryAfter) * 1000 : Number.NaN;
+      const backoffMs = Number.isFinite(retryAfterMs)
+        ? retryAfterMs
+        : Math.min(30_000, 750 * (2 ** (attempt - 1)));
+      await sleep(backoffMs);
+    } catch (err) {
+      lastError = err;
+      if (attempt >= maxAttempts) throw err;
+      await sleep(Math.min(30_000, 750 * (2 ** (attempt - 1))));
+    }
   }
 
-  return res;
+  throw lastError instanceof Error ? lastError : new Error("Attio request failed");
 }
 
 interface AttioRecord {
@@ -303,8 +330,7 @@ export interface CompanyResolution {
   reason: string;
 }
 
-export async function resolveCompanyByName(name: string): Promise<CompanyResolution> {
-  const candidates = await findCompanyCandidates(name);
+function resolveCompanyByNameFromCandidates(name: string, candidates: AttioRecordSummary[]): CompanyResolution {
   if (candidates.length === 0) {
     return { status: "missing", candidates, reason: `no company matched ${name}` };
   }
@@ -332,6 +358,29 @@ export async function resolveCompanyByName(name: string): Promise<CompanyResolut
     candidates,
     reason: `matched ${candidates.length} companies but none was exact enough for ${name}`,
   };
+}
+
+export function resolveCompanyByNameLocal(name: string, companies: AttioRecordSummary[]): CompanyResolution {
+  const target = normalizeAssociationName(name);
+  const candidates = companies.filter((company) => {
+    if (normalizeAssociationName(company.name).includes(target)) return true;
+    return company.domains.some((domain) => normalizeAssociationName(domain.split(".")[0]).includes(target));
+  });
+  return resolveCompanyByNameFromCandidates(name, candidates.slice(0, 10));
+}
+
+export async function resolveCompanyByName(
+  name: string,
+  options?: { knownCompanies?: AttioRecordSummary[] },
+): Promise<CompanyResolution> {
+  const knownCompanies = options?.knownCompanies || [];
+  if (knownCompanies.length > 0) {
+    const local = resolveCompanyByNameLocal(name, knownCompanies);
+    if (local.status === "resolved") return local;
+  }
+
+  const remoteCandidates = await findCompanyCandidates(name);
+  return resolveCompanyByNameFromCandidates(name, remoteCandidates);
 }
 
 export interface PersonSummary {

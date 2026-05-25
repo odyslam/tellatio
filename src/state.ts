@@ -34,6 +34,14 @@ export interface SyncState {
   interactions: Record<string, PersonInteractions>;
   // "recordId:chatId" → full transcript for the note
   transcripts: Record<string, NoteTranscript>;
+  runs?: Record<string, RunState>;
+}
+
+export interface RunState {
+  status: "success" | "failed" | "dry_run";
+  finishedAt: string;
+  counts?: Record<string, number>;
+  error?: string;
 }
 
 function statePath(dataDir: string): string {
@@ -62,6 +70,11 @@ export function getChatState(state: SyncState, chatId: string): ChatSyncState {
 
 export function setChatState(state: SyncState, chatId: string, update: ChatSyncState): void {
   state.chats[chatId] = update;
+}
+
+export function setRunState(state: SyncState, name: string, run: RunState): void {
+  if (!state.runs) state.runs = {};
+  state.runs[name] = run;
 }
 
 /**
