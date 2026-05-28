@@ -2,17 +2,20 @@ import { TelegramClient } from "telegram";
 import { StringSession } from "telegram/sessions";
 import { Api } from "telegram";
 import type { Config } from "./config";
+import type { BannedTelegramUser } from "./bans";
 
 export interface TelegramMessage {
   id: number;
   date: number; // unix timestamp
   senderIdStr: string | undefined;
+  senderUsername: string | undefined;
   senderName: string;
   text: string;
 }
 
 export interface ChatInfo {
   idStr: string;
+  username?: string;
   title: string;
   isGroup: boolean;
   type: "dm" | "group" | "supergroup" | "channel" | "unknown";
@@ -65,7 +68,10 @@ function getClient(): TelegramClient {
 /**
  * Find the Telegram folder by name and return the chat IDs (peers) it contains.
  */
-export async function getFolderChatIds(folderName: string): Promise<Api.TypeInputPeer[]> {
+export async function getFolderChatIds(
+  folderName: string,
+  options: { warnIfMissing?: boolean } = {},
+): Promise<Api.TypeInputPeer[]> {
   const c = getClient();
   const result = await c.invoke(new Api.messages.GetDialogFilters());
 
@@ -76,6 +82,7 @@ export async function getFolderChatIds(folderName: string): Promise<Api.TypeInpu
   );
 
   if (!folder) {
+    if (options.warnIfMissing === false) return [];
     console.warn(`[telegram] Folder "${folderName}" not found. Available folders:`,
       filters
         .filter((f): f is Api.DialogFilter => f instanceof Api.DialogFilter)
@@ -90,7 +97,7 @@ export async function getFolderChatIds(folderName: string): Promise<Api.TypeInpu
 function entityToChatInfo(entity: unknown): ChatInfo | null {
   if (entity instanceof Api.User) {
     const name = [entity.firstName, entity.lastName].filter(Boolean).join(" ") || entity.username || "Unknown";
-    return { idStr: entity.id.toString(), title: name, isGroup: false, type: "dm" };
+    return { idStr: entity.id.toString(), username: entity.username, title: name, isGroup: false, type: "dm" };
   }
 
   if (entity instanceof Api.Chat) {
@@ -100,6 +107,7 @@ function entityToChatInfo(entity: unknown): ChatInfo | null {
   if (entity instanceof Api.Channel) {
     return {
       idStr: entity.id.toString(),
+      username: entity.username,
       title: entity.title,
       isGroup: true,
       type: entity.megagroup ? "supergroup" : "channel",
@@ -107,6 +115,51 @@ function entityToChatInfo(entity: unknown): ChatInfo | null {
   }
 
   return null;
+}
+
+function entityToBannedUser(entity: unknown): BannedTelegramUser | null {
+  const chatInfo = entityToChatInfo(entity);
+  if (!chatInfo) return null;
+
+  if (entity instanceof Api.User) {
+    return {
+      chatId: entity.id.toString(),
+      chatType: "dm",
+      userId: entity.id.toString(),
+      username: entity.username,
+      displayName: chatInfo.title,
+      source: "folder",
+    };
+  }
+
+  return {
+    chatId: chatInfo.idStr,
+    chatType: chatInfo.type,
+    username: chatInfo.username,
+    displayName: chatInfo.title,
+    source: "folder",
+  };
+}
+
+/**
+ * Load peers from the ban folder. DMs become user-level bans, so the same
+ * account is filtered from group message fetches as well.
+ */
+export async function getBanFolderUsers(folderName: string): Promise<BannedTelegramUser[]> {
+  const peers = await getFolderChatIds(folderName, { warnIfMissing: false });
+  const users: BannedTelegramUser[] = [];
+
+  for (const peer of peers) {
+    try {
+      const entity = await getClient().getEntity(peer);
+      const banned = entityToBannedUser(entity);
+      if (banned) users.push(banned);
+    } catch (err) {
+      console.warn(`[telegram] Failed to resolve ban folder peer in "${folderName}":`, err);
+    }
+  }
+
+  return users;
 }
 
 /**
@@ -181,9 +234,11 @@ export async function getMessages(
     if (!msg.message) continue; // skip service messages with no text
 
     let senderName = "Unknown";
+    let senderUsername: string | undefined;
     if (msg.sender) {
       if (msg.sender instanceof Api.User) {
         senderName = [msg.sender.firstName, msg.sender.lastName].filter(Boolean).join(" ") || "Unknown";
+        senderUsername = msg.sender.username;
       } else if ("title" in msg.sender) {
         senderName = (msg.sender as { title: string }).title;
       }
@@ -193,6 +248,7 @@ export async function getMessages(
       id: msg.id,
       date: msg.date,
       senderIdStr: msg.senderId?.toString(),
+      senderUsername,
       senderName,
       text: msg.text || msg.message,
     });

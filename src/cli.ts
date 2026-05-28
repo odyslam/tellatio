@@ -26,6 +26,16 @@ import {
   type TelegramIdentityInput,
 } from "./identity";
 import { loadState, saveState, setRunState, type RunState, type SyncState } from "./state";
+import {
+  compileBanList,
+  describeBannedUser,
+  matchBannedIdentifier,
+  matchBannedTelegramChat,
+  matchBannedTelegramUser,
+  parseEnvBannedUsers,
+  type BanList,
+  type BannedTelegramUser,
+} from "./bans";
 
 const execFileAsync = promisify(execFile);
 
@@ -61,6 +71,7 @@ function requireEnv(name: string): string {
 // ─── Helpers ────────────────────────────────────────────────────
 
 let commandOutput: unknown;
+let activeBanList: BanList = compileBanList([]);
 
 function die(msg: string): never {
   throw new Error(msg);
@@ -80,6 +91,7 @@ async function runTelegram(operation: () => Promise<void>): Promise<unknown> {
   loadEnv();
   await connect();
   try {
+    await refreshActiveBanList();
     await operation();
     return commandOutput ?? null;
   } finally {
@@ -101,6 +113,7 @@ async function runTelegramAndAttio(operation: () => Promise<void>): Promise<unkn
   attio.initAttio(requireEnv("ATTIO_API_KEY"));
   await connect();
   try {
+    await refreshActiveBanList();
     await operation();
     return commandOutput ?? null;
   } finally {
@@ -153,6 +166,20 @@ function dataDirFromEnv(): string {
   return process.env["DATA_DIR"] || path.resolve(__dirname, "..", "data");
 }
 
+function banFolderNameFromEnv(): string {
+  return process.env["TELLATIO_BAN_FOLDER_NAME"] || "Banned";
+}
+
+function isBanFolderName(name: string): boolean {
+  return name.trim().toLowerCase() === banFolderNameFromEnv().trim().toLowerCase();
+}
+
+function assertNotBanFolderName(name: string, operation: string): void {
+  if (isBanFolderName(name)) {
+    die(`Use tellatio bans ${operation} for the "${banFolderNameFromEnv()}" folder`);
+  }
+}
+
 function loadLocalState(): { dataDir: string; state: SyncState } {
   const dataDir = dataDirFromEnv();
   return { dataDir, state: loadState(dataDir) };
@@ -166,6 +193,187 @@ function recordRunState(name: string, run: RunState): void {
   } catch {
     // Run metadata is useful for doctor, but should not make the primary command fail.
   }
+}
+
+function loadCliBanList(): BanList {
+  return activeBanList;
+}
+
+async function refreshActiveBanList(): Promise<void> {
+  activeBanList = compileBanList([
+    ...parseEnvBannedUsers(),
+    ...await loadBanFolderUsers(banFolderNameFromEnv()),
+  ]);
+}
+
+function matchBannedEntity(banList: BanList, entity: unknown): BannedTelegramUser | undefined {
+  if (entity instanceof Api.User) {
+    return matchBannedTelegramChat(banList, {
+      chatId: entity.id.toString(),
+      chatType: "dm",
+      userIdStr: entity.id.toString(),
+      username: entity.username,
+    });
+  }
+
+  if (entity instanceof Api.Chat) {
+    return matchBannedTelegramChat(banList, {
+      chatId: entity.id.toString(),
+      chatType: "group",
+    });
+  }
+
+  if (entity instanceof Api.Channel) {
+    return matchBannedTelegramChat(banList, {
+      chatId: entity.id.toString(),
+      chatType: entity.megagroup ? "supergroup" : "channel",
+      username: entity.username,
+    });
+  }
+
+  return undefined;
+}
+
+async function loadBanFolderUsers(folderName: string): Promise<BannedTelegramUser[]> {
+  const folder = findDialogFolder(await loadDialogFilters(), folderName);
+  if (!folder) return [];
+
+  const users: BannedTelegramUser[] = [];
+  for (const peer of folder.includePeers) {
+    try {
+      const entity = await client.getEntity(peer);
+      const chat = serializeChat(entity);
+      if (entity instanceof Api.User) {
+        users.push({
+          chatId: entity.id.toString(),
+          chatType: "dm",
+          userId: entity.id.toString(),
+          username: entity.username,
+          displayName: chatDisplayName(entity),
+          source: "folder",
+        });
+      } else if (entity instanceof Api.Chat) {
+        users.push({
+          chatId: entity.id.toString(),
+          chatType: "group",
+          displayName: entity.title,
+          source: "folder",
+        });
+      } else if (entity instanceof Api.Channel) {
+        users.push({
+          chatId: entity.id.toString(),
+          chatType: entity.megagroup ? "supergroup" : "channel",
+          username: entity.username,
+          displayName: entity.title,
+          source: "folder",
+        });
+      } else {
+        users.push({
+          chatId: String(chat.id || inputPeerKey(peer)),
+          chatType: "unknown",
+          displayName: String(chat.title || chat.name || "unknown"),
+          source: "folder",
+        });
+      }
+    } catch {}
+  }
+
+  return users;
+}
+
+function serializeBan(entry: BannedTelegramUser): Record<string, unknown> {
+  return {
+    chatId: entry.chatId,
+    chatType: entry.chatType,
+    userId: entry.userId,
+    username: entry.username,
+    displayName: entry.displayName,
+    reason: entry.reason,
+    createdAt: entry.createdAt,
+    source: entry.source,
+  };
+}
+
+function banEntryFromEntity(entity: unknown, reason?: string): BannedTelegramUser {
+  const createdAt = new Date().toISOString();
+  if (entity instanceof Api.User) {
+    return {
+      chatId: entity.id.toString(),
+      chatType: "dm",
+      userId: entity.id.toString(),
+      username: entity.username,
+      displayName: chatDisplayName(entity),
+      reason,
+      createdAt,
+      source: "folder",
+    };
+  }
+  if (entity instanceof Api.Chat) {
+    return {
+      chatId: entity.id.toString(),
+      chatType: "group",
+      displayName: entity.title,
+      reason,
+      createdAt,
+      source: "folder",
+    };
+  }
+  if (entity instanceof Api.Channel) {
+    return {
+      chatId: entity.id.toString(),
+      chatType: entity.megagroup ? "supergroup" : "channel",
+      username: entity.username,
+      displayName: entity.title,
+      reason,
+      createdAt,
+      source: "folder",
+    };
+  }
+
+  die("Cannot ban this Telegram entity type");
+}
+
+function activeBanFolderSummary(folder: Api.DialogFilter | undefined): Record<string, unknown> {
+  return {
+    folderName: banFolderNameFromEnv(),
+    exists: Boolean(folder),
+    peerCount: folder?.includePeers.length || 0,
+  };
+}
+
+function assertIdentifierAllowed(identifier: string, operation: string): void {
+  const match = matchBannedIdentifier(loadCliBanList(), identifier);
+  if (match) {
+    die(`Refusing to ${operation} banned Telegram user ${describeBannedUser(match)}`);
+  }
+}
+
+function assertEntityAllowed(entity: unknown, operation: string): void {
+  const match = matchBannedEntity(loadCliBanList(), entity);
+  if (match) {
+    die(`Refusing to ${operation} banned Telegram user ${describeBannedUser(match)}`);
+  }
+}
+
+function isMessageFromBannedUser(message: Api.Message, banList: BanList): boolean {
+  if (message.sender instanceof Api.User) {
+    return Boolean(matchBannedTelegramUser(banList, {
+      userIdStr: message.sender.id.toString(),
+      username: message.sender.username,
+    }));
+  }
+
+  return Boolean(matchBannedTelegramUser(banList, {
+    userIdStr: message.senderId?.toString(),
+  }));
+}
+
+function filterBannedMessages(messages: Api.Message[], banList: BanList): Api.Message[] {
+  return messages.filter((message) => !isMessageFromBannedUser(message, banList));
+}
+
+function filterBannedDialogs<T extends { entity?: unknown }>(dialogs: T[], banList: BanList): T[] {
+  return dialogs.filter((dialog) => !matchBannedEntity(banList, dialog.entity));
 }
 
 // ─── Telegram Client ────────────────────────────────────────────
@@ -225,6 +433,15 @@ function entityIdString(entity: unknown): string | undefined {
     return (entity as { id: unknown }).id?.toString();
   }
 
+  return undefined;
+}
+
+function dialogCanonicalId(dialog: { id?: unknown; entity?: unknown }): string | undefined {
+  const entityId = entityIdString(dialog.entity);
+  if (entityId) return entityId;
+  if (dialog && typeof dialog === "object" && "id" in dialog) {
+    return (dialog as { id?: unknown }).id?.toString();
+  }
   return undefined;
 }
 
@@ -554,6 +771,7 @@ async function collectCompanyProfileSignals(
   fetchBio: (user: Api.User) => Promise<string | undefined>,
   participantLimit: number,
   excludedCompanyNames: string[],
+  banList: BanList = loadCliBanList(),
 ): Promise<CompanyProfileSignal[]> {
   if (!knownCompanies.length) return [];
   if (!(entity instanceof Api.Chat || entity instanceof Api.Channel)) return [];
@@ -564,6 +782,7 @@ async function collectCompanyProfileSignals(
     const users = await client.getParticipants(entity as never, {});
     for (const user of users.slice(0, participantLimit)) {
       if (!(user instanceof Api.User) || user.bot) continue;
+      if (matchBannedEntity(banList, user)) continue;
 
       const bio = await fetchBio(user);
       const hints = inferCompanyHintsFromText(
@@ -701,8 +920,10 @@ function serializePersonCandidate(candidate: attio.PersonSummary): Record<string
 
 function serializeMessage(m: Api.Message): Record<string, unknown> {
   let senderName = "Unknown";
+  let senderUsername: string | undefined;
   if (m.sender instanceof Api.User) {
     senderName = [m.sender.firstName, m.sender.lastName].filter(Boolean).join(" ") || "Unknown";
+    senderUsername = m.sender.username;
   } else if (m.sender && "title" in m.sender) {
     senderName = (m.sender as any).title;
   }
@@ -712,6 +933,7 @@ function serializeMessage(m: Api.Message): Record<string, unknown> {
     date: m.date,
     dateISO: new Date(m.date * 1000).toISOString(),
     senderId: m.senderId?.toString(),
+    senderUsername,
     senderName,
     text: m.text || m.message || "",
     out: m.out,
@@ -739,9 +961,12 @@ async function cmdMe(): Promise<void> {
 
 async function cmdChatsList(flags: Record<string, string>): Promise<void> {
   const limit = numFlag(flags, "limit", 50);
-  const dialogs = await client.getDialogs({ limit });
+  const banList = loadCliBanList();
+  const dialogs = filterBannedDialogs(await client.getDialogs({ limit }), banList);
   const results = dialogs.map((d) => ({
-    id: d.id?.toString(),
+    id: dialogCanonicalId(d) || "",
+    canonicalId: entityIdString(d.entity) || dialogCanonicalId(d) || "",
+    dialogId: d.id?.toString(),
     name: d.name || d.title,
     isGroup: d.isGroup,
     isChannel: d.isChannel,
@@ -760,12 +985,13 @@ async function cmdChatsSearch(positional: string[], flags: Record<string, string
   const query = positional[0];
   if (!query) die("Usage: tellatio chats search <query>");
   const limit = numFlag(flags, "limit", 20);
+  const banList = loadCliBanList();
 
   const result = await client.invoke(new Api.contacts.Search({ q: query, limit }));
   const entities: Record<string, unknown>[] = [];
 
   for (const u of result.users) {
-    if (u instanceof Api.User) entities.push(serializeUser(u));
+    if (u instanceof Api.User && !matchBannedEntity(banList, u)) entities.push(serializeUser(u));
   }
   for (const c of result.chats) {
     entities.push(serializeChat(c as Api.User | Api.Chat | Api.Channel));
@@ -776,7 +1002,9 @@ async function cmdChatsSearch(positional: string[], flags: Record<string, string
 async function cmdChatsInfo(positional: string[]): Promise<void> {
   const id = positional[0];
   if (!id) die("Usage: tellatio chats info <chat>");
+  assertIdentifierAllowed(id, "inspect");
   const entity = await resolveEntity(id);
+  assertEntityAllowed(entity, "inspect");
   out(serializeChat(entity));
 }
 
@@ -784,7 +1012,9 @@ async function cmdChatsResolve(positional: string[]): Promise<void> {
   const id = positional[0];
   if (!id) die("Usage: tellatio chats resolve <chat>");
 
+  assertIdentifierAllowed(id, "resolve");
   const entity = await resolveEntity(id);
+  assertEntityAllowed(entity, "resolve");
   const inputPeer = await client.getInputEntity(entity) as unknown as Api.TypeInputPeer;
   out({
     input: id,
@@ -798,6 +1028,7 @@ async function cmdChatsResolve(positional: string[]): Promise<void> {
 async function cmdChatsFolder(positional: string[]): Promise<void> {
   const folderName = positional[0];
   if (!folderName) die("Usage: tellatio chats folder <name>");
+  if (isBanFolderName(folderName)) die(`Use tellatio bans list for the "${banFolderNameFromEnv()}" folder`);
 
   const result = await client.invoke(new Api.messages.GetDialogFilters());
   const folder = result.filters.find(
@@ -813,9 +1044,11 @@ async function cmdChatsFolder(positional: string[]): Promise<void> {
   }
 
   const chats: Record<string, unknown>[] = [];
+  const banList = loadCliBanList();
   for (const peer of folder.includePeers) {
     try {
       const entity = await client.getEntity(peer);
+      if (matchBannedEntity(banList, entity)) continue;
       chats.push(serializeChat(entity));
     } catch {}
   }
@@ -824,11 +1057,14 @@ async function cmdChatsFolder(positional: string[]): Promise<void> {
 
 async function cmdChatsUnread(flags: Record<string, string>): Promise<void> {
   const limit = numFlag(flags, "limit", 50);
-  const dialogs = await client.getDialogs({ limit });
+  const banList = loadCliBanList();
+  const dialogs = filterBannedDialogs(await client.getDialogs({ limit }), banList);
   const unread = dialogs
     .filter((d) => d.unreadCount > 0)
     .map((d) => ({
-      id: d.id?.toString(),
+      id: dialogCanonicalId(d) || "",
+      canonicalId: entityIdString(d.entity) || dialogCanonicalId(d) || "",
+      dialogId: d.id?.toString(),
       name: d.name || d.title,
       isGroup: d.isGroup,
       isChannel: d.isChannel,
@@ -846,6 +1082,7 @@ async function cmdChatsUnread(flags: Record<string, string>): Promise<void> {
 async function cmdChatsActivity(positional: string[], flags: Record<string, string>): Promise<void> {
   const folderName = positional[0];
   if (!folderName) die("Usage: tellatio chats activity <folder> [--since X]");
+  if (isBanFolderName(folderName)) die(`Use tellatio bans list for the "${banFolderNameFromEnv()}" folder`);
 
   const sinceTs = flags["since"] ? parseTimeFilter(flags["since"]) : parseTimeFilter("today");
 
@@ -857,16 +1094,18 @@ async function cmdChatsActivity(positional: string[], flags: Record<string, stri
   if (!folder) die(`Folder "${folderName}" not found`);
 
   const activity: Record<string, unknown>[] = [];
+  const banList = loadCliBanList();
 
   for (const peer of folder.includePeers) {
     try {
       const entity = await client.getEntity(peer);
+      if (matchBannedEntity(banList, entity)) continue;
       const chatName = entity instanceof Api.User
         ? [entity.firstName, entity.lastName].filter(Boolean).join(" ")
         : (entity as any).title || "Unknown";
 
       const messages = await client.getMessages(entity, { limit: 100 });
-      const recent = messages.filter((m) => m.date >= sinceTs);
+      const recent = filterBannedMessages(messages, banList).filter((m) => m.date >= sinceTs);
 
       if (recent.length > 0) {
         activity.push({
@@ -892,8 +1131,10 @@ async function cmdChatsStatus(positional: string[]): Promise<void> {
   const chatId = positional[0];
   if (!chatId) die("Usage: tellatio chats status <user>");
 
+  assertIdentifierAllowed(chatId, "read status for");
   const entity = await resolveEntity(chatId);
   if (!(entity instanceof Api.User)) die("Online status is only available for users, not groups/channels");
+  assertEntityAllowed(entity, "read status for");
 
   const status = entity.status;
   let statusInfo: Record<string, unknown> = { type: "unknown" };
@@ -1129,6 +1370,7 @@ async function cmdFoldersList(): Promise<void> {
 async function cmdFoldersCreate(positional: string[], flags: Record<string, string>): Promise<void> {
   const name = positional[0];
   if (!name) die("Usage: tellatio folders create <name> [--chats chat1,chat2] [--contacts] [--groups] [--channels] [--bots]");
+  assertNotBanFolderName(name, "add");
   validateDialogFolderName(name);
 
   const filters = await loadDialogFilters();
@@ -1186,6 +1428,8 @@ async function cmdFoldersRename(positional: string[]): Promise<void> {
   const from = positional[0];
   const to = positional[1];
   if (!from || !to) die("Usage: tellatio folders rename <old-name> <new-name>");
+  assertNotBanFolderName(from, "list/remove");
+  assertNotBanFolderName(to, "add");
   validateDialogFolderName(to);
 
   const filters = await loadDialogFilters();
@@ -1211,6 +1455,7 @@ async function cmdFoldersRename(positional: string[]): Promise<void> {
 async function cmdFoldersDelete(positional: string[]): Promise<void> {
   const name = positional[0];
   if (!name) die("Usage: tellatio folders delete <name>");
+  assertNotBanFolderName(name, "remove");
 
   const folder = requireDialogFolder(await loadDialogFilters(), name);
   if (positional[1] === "dry-run") {
@@ -1233,6 +1478,7 @@ async function cmdFoldersAdd(positional: string[]): Promise<void> {
   const name = positional[0];
   const chat = positional[1];
   if (!name || !chat) die("Usage: tellatio folders add <folder> <chat|chat1,chat2>");
+  assertNotBanFolderName(name, "add");
 
   const folder = requireDialogFolder(await loadDialogFilters(), name);
   const peers = await resolveFolderPeers(chat);
@@ -1275,6 +1521,7 @@ async function cmdFoldersRemove(positional: string[]): Promise<void> {
   const name = positional[0];
   const chat = positional[1];
   if (!name || !chat) die("Usage: tellatio folders remove <folder> <chat|chat1,chat2>");
+  assertNotBanFolderName(name, "remove");
 
   const folder = requireDialogFolder(await loadDialogFilters(), name);
   const peers = await resolveFolderPeers(chat);
@@ -1315,6 +1562,7 @@ async function cmdFoldersPin(positional: string[]): Promise<void> {
   const name = positional[0];
   const chat = positional[1];
   if (!name || !chat) die("Usage: tellatio folders pin <folder> <chat|chat1,chat2>");
+  assertNotBanFolderName(name, "add");
 
   const folder = requireDialogFolder(await loadDialogFilters(), name);
   const peers = await resolveFolderPeers(chat);
@@ -1357,6 +1605,7 @@ async function cmdFoldersUnpin(positional: string[]): Promise<void> {
   const name = positional[0];
   const chat = positional[1];
   if (!name || !chat) die("Usage: tellatio folders unpin <folder> <chat|chat1,chat2>");
+  assertNotBanFolderName(name, "remove");
 
   const folder = requireDialogFolder(await loadDialogFilters(), name);
   const peers = await resolveFolderPeers(chat);
@@ -1384,6 +1633,7 @@ async function cmdFoldersExcludeAdd(positional: string[]): Promise<void> {
   const name = positional[0];
   const chat = positional[1];
   if (!name || !chat) die("Usage: tellatio folders exclude-add <folder> <chat|chat1,chat2>");
+  assertNotBanFolderName(name, "add");
 
   const folder = requireDialogFolder(await loadDialogFilters(), name);
   if (!folderHasBuiltInSource(folder)) {
@@ -1427,6 +1677,7 @@ async function cmdFoldersExcludeRemove(positional: string[]): Promise<void> {
   const name = positional[0];
   const chat = positional[1];
   if (!name || !chat) die("Usage: tellatio folders exclude-remove <folder> <chat|chat1,chat2>");
+  assertNotBanFolderName(name, "remove");
 
   const folder = requireDialogFolder(await loadDialogFilters(), name);
   const peers = await resolveFolderPeers(chat);
@@ -1453,6 +1704,7 @@ async function cmdFoldersExcludeRemove(positional: string[]): Promise<void> {
 async function cmdFoldersSources(positional: string[], flags: Record<string, string>): Promise<void> {
   const name = positional[0];
   if (!name) die("Usage: tellatio folders sources <folder> [--groups true|false] [--contacts true|false] ...");
+  assertNotBanFolderName(name, "list/add/remove");
 
   const folder = requireDialogFolder(await loadDialogFilters(), name);
   const updated = cloneDialogFolder(folder, sourceFlagOverrides(folder, flags));
@@ -1514,15 +1766,16 @@ async function cmdDiscoverAssociations(flags: Record<string, string>): Promise<v
   const limit = numFlag(flags, "limit", 100);
   const sinceTs = flags["since"] ? parseTimeFilter(flags["since"]) : parseTimeFilter("3d");
   const includeIgnored = flags["include-ignored"] === "true";
-  out(await discoverAssociationSuggestions(limit, sinceTs, includeIgnored));
+  out(await discoverAssociationSuggestions(limit, sinceTs, includeIgnored, loadCliBanList()));
 }
 
 async function discoverAssociationSuggestions(
   limit: number,
   sinceTs: number,
   includeIgnored: boolean,
+  banList: BanList = loadCliBanList(),
 ): Promise<ReturnType<typeof suggestAssociation>[]> {
-  const dialogs = await client.getDialogs({ limit });
+  const dialogs = filterBannedDialogs(await client.getDialogs({ limit }), banList);
 
   return dialogs
     .filter((dialog) => dialog.message && dialog.message.date >= sinceTs)
@@ -1531,7 +1784,7 @@ async function discoverAssociationSuggestions(
       const title = chatDisplayName(entity, dialog.name || dialog.title || "Unknown");
       const lastText = compactText(dialog.message?.text || dialog.message?.message || "");
       return suggestAssociation({
-        chatId: dialog.entity && "id" in dialog.entity ? dialog.entity.id.toString() : dialog.id?.toString() || "",
+        chatId: dialogCanonicalId(dialog) || "",
         title,
         type: associationChatType(entity),
         lastMessageAt: dialog.message ? new Date(dialog.message.date * 1000).toISOString() : undefined,
@@ -1617,12 +1870,13 @@ async function cmdAssociationsReconcile(flags: Record<string, string>): Promise<
   const profileParticipantLimit = numFlag(flags, "profile-participant-limit", 30);
   const companyLimit = numFlag(flags, "company-limit", 500);
   const isDryRun = dryRun(flags);
+  const banList = loadCliBanList();
 
   if (!Number.isFinite(minConfidence) || minConfidence < 0 || minConfidence > 1) {
     die("--min-confidence must be between 0 and 1");
   }
 
-  const dialogs = await client.getDialogs({ limit });
+  const dialogs = filterBannedDialogs(await client.getDialogs({ limit }), banList);
   const dialogByChatId = new Map<string, (typeof dialogs)[number]>();
   for (const dialog of dialogs) {
     const entity = dialog.entity;
@@ -1636,7 +1890,7 @@ async function cmdAssociationsReconcile(flags: Record<string, string>): Promise<
     : [];
   const fetchBio = createBioFetcher(includeProfileDescriptions);
   const excludedCompanyNames = loadOwnCompanyNames();
-  const suggestions = await discoverAssociationSuggestions(limit, sinceTs, false);
+  const suggestions = await discoverAssociationSuggestions(limit, sinceTs, false, banList);
   const result = {
     approved: [] as Array<Record<string, unknown>>,
     needsReview: [] as Array<Record<string, unknown>>,
@@ -1654,6 +1908,7 @@ async function cmdAssociationsReconcile(flags: Record<string, string>): Promise<
         fetchBio,
         profileParticipantLimit,
         excludedCompanyNames,
+        banList,
       )
       : [];
     const suggestion = withCompanyProfileSignals(originalSuggestion, profileSignals);
@@ -1831,7 +2086,8 @@ async function collectIdentityInputs(flags: Record<string, string>): Promise<Tel
   const includeParticipants = flags["include-participants"] !== "false";
   const includeProfileDescriptions = flags["include-profile-descriptions"] !== "false";
   const companyLimit = numFlag(flags, "company-limit", 500);
-  const dialogs = await client.getDialogs({ limit });
+  const banList = loadCliBanList();
+  const dialogs = filterBannedDialogs(await client.getDialogs({ limit }), banList);
   const me = await client.getMe() as Api.User;
   const excludedUserIds = new Set([me.id.toString(), "777000"]);
   const excludedCompanyNames = loadOwnCompanyNames();
@@ -1841,6 +2097,10 @@ async function collectIdentityInputs(flags: Record<string, string>): Promise<Tel
   function addIdentity(input: TelegramIdentityInput | null): void {
     if (!input) return;
     if (excludedUserIds.has(input.telegramUserId)) return;
+    if (matchBannedTelegramUser(banList, {
+      userIdStr: input.telegramUserId,
+      username: input.username,
+    })) return;
     const existing = identities.get(input.telegramUserId);
     if (!existing) {
       identities.set(input.telegramUserId, input);
@@ -1875,6 +2135,7 @@ async function collectIdentityInputs(flags: Record<string, string>): Promise<Tel
     dialogByChatId.set(entity.id.toString(), dialog);
 
     if (entity instanceof Api.User && dialog.message && dialog.message.date >= sinceTs) {
+      if (matchBannedEntity(banList, entity)) continue;
       const bio = await userBio(entity);
       addIdentity(telegramIdentityFromUser(
         entity,
@@ -1907,6 +2168,7 @@ async function collectIdentityInputs(flags: Record<string, string>): Promise<Tel
       }
       for (const user of users.slice(0, participantLimit)) {
         if (user instanceof Api.User) {
+          if (matchBannedEntity(banList, user)) continue;
           const bio = await userBio(user);
           addIdentity(telegramIdentityFromUser(
             user,
@@ -2118,6 +2380,132 @@ async function cmdIdentitiesStatus(flags: Record<string, string>): Promise<void>
   });
 }
 
+// ── bans ────────────────────────────────────────────────────────
+
+async function cmdBansList(): Promise<void> {
+  const folderName = banFolderNameFromEnv();
+  const folder = findDialogFolder(await loadDialogFilters(), folderName);
+  await refreshActiveBanList();
+  out({
+    folder: activeBanFolderSummary(folder),
+    counts: {
+      total: activeBanList.users.length,
+    },
+    users: activeBanList.users.map(serializeBan),
+  });
+}
+
+async function cmdBansAdd(positional: string[], flags: Record<string, string>): Promise<void> {
+  const identifier = positional[0];
+  if (!identifier) die("Usage: tellatio bans add <username-or-chat-id> [--reason text]");
+
+  const folderName = banFolderNameFromEnv();
+  validateDialogFolderName(folderName);
+  const filters = await loadDialogFilters();
+  const folder = findDialogFolder(filters, folderName);
+  const entity = await resolveEntity(identifier);
+  const peer = await client.getInputEntity(entity) as unknown as Api.TypeInputPeer;
+  const entry = banEntryFromEntity(entity, flags["reason"]);
+  const existingKeys = new Set(folder?.includePeers.map(inputPeerKey) || []);
+  const alreadyPresent = existingKeys.has(inputPeerKey(peer));
+
+  const updated = folder
+    ? (alreadyPresent ? folder : cloneDialogFolder(folder, { includePeers: [...folder.includePeers, peer] }))
+    : new Api.DialogFilter({
+      id: nextDialogFolderId(filters),
+      title: folderTitle(folderName),
+      pinnedPeers: [],
+      includePeers: [peer],
+      excludePeers: [],
+    });
+
+  if (dryRun(flags)) {
+    out({
+      dryRun: true,
+      action: "bans.add",
+      folder: activeBanFolderSummary(folder),
+      after: activeBanFolderSummary(updated),
+      alreadyPresent,
+      user: serializeBan(entry),
+    });
+    return;
+  }
+
+  const ok = alreadyPresent ? true : await saveDialogFolder(updated);
+  await refreshActiveBanList();
+  out({
+    updated: ok,
+    folder: activeBanFolderSummary(updated),
+    alreadyPresent,
+    added: serializeBan(entry),
+    users: activeBanList.users.map(serializeBan),
+  });
+}
+
+async function cmdBansRemove(positional: string[], flags: Record<string, string>): Promise<void> {
+  const identifier = positional[0];
+  if (!identifier) die("Usage: tellatio bans remove <username-or-chat-id>");
+
+  const folderName = banFolderNameFromEnv();
+  const folder = findDialogFolder(await loadDialogFilters(), folderName);
+  if (!folder) {
+    out({
+      folder: activeBanFolderSummary(folder),
+      removed: [],
+      users: [],
+    });
+    return;
+  }
+
+  const entity = await resolveEntity(identifier);
+  const peer = await client.getInputEntity(entity) as unknown as Api.TypeInputPeer;
+  const removeKey = inputPeerKey(peer);
+  const removed = folder.includePeers.some((existing) => inputPeerKey(existing) === removeKey);
+  const includePeers = folder.includePeers.filter((existing) => inputPeerKey(existing) !== removeKey);
+  const pinnedPeers = folder.pinnedPeers.filter((existing) => inputPeerKey(existing) !== removeKey);
+  const updated = cloneDialogFolder(folder, { includePeers, pinnedPeers });
+  const willDeleteFolder = removed && includePeers.length === 0 && !folderHasBuiltInSource(folder);
+
+  if (dryRun(flags)) {
+    out({
+      dryRun: true,
+      action: "bans.remove",
+      folder: activeBanFolderSummary(folder),
+      after: willDeleteFolder ? { folderName, exists: false, peerCount: 0 } : activeBanFolderSummary(updated),
+      removed,
+      user: serializeBan(banEntryFromEntity(entity)),
+    });
+    return;
+  }
+
+  let ok = true;
+  if (removed && willDeleteFolder) {
+    ok = await client.invoke(new Api.messages.UpdateDialogFilter({ id: folder.id }));
+  } else if (removed) {
+    ok = await saveDialogFolder(updated);
+  }
+  await refreshActiveBanList();
+  out({
+    updated: ok,
+    folder: willDeleteFolder ? { folderName, exists: false, peerCount: 0 } : activeBanFolderSummary(updated),
+    removed: removed ? [serializeBan(banEntryFromEntity(entity))] : [],
+    users: activeBanList.users.map(serializeBan),
+  });
+}
+
+async function cmdBansCheck(positional: string[]): Promise<void> {
+  const identifier = positional[0];
+  if (!identifier) die("Usage: tellatio bans check <username-or-chat-id>");
+
+  const entity = await resolveEntity(identifier);
+  const match = matchBannedEntity(loadCliBanList(), entity) || matchBannedIdentifier(loadCliBanList(), identifier);
+  out({
+    folderName: banFolderNameFromEnv(),
+    banned: Boolean(match),
+    user: match ? serializeBan(match) : undefined,
+  });
+}
+
 // ── msg ─────────────────────────────────────────────────────────
 
 /**
@@ -2200,10 +2588,14 @@ async function cmdMsgRead(positional: string[], flags: Record<string, string>): 
   // If time-filtering, fetch more to ensure we have enough
   if (sinceTs || untilTs) limit = Math.max(limit, 200);
 
+  assertIdentifierAllowed(chatId, "read messages from");
   const entity = await resolveEntity(chatId);
+  assertEntityAllowed(entity, "read messages from");
+  const banList = loadCliBanList();
   let messages = await client.getMessages(entity, { limit, offsetId, minId });
 
   // Apply time filters
+  messages = filterBannedMessages(messages, banList);
   if (sinceTs) messages = messages.filter((m) => m.date >= sinceTs);
   if (untilTs) messages = messages.filter((m) => m.date <= untilTs);
 
@@ -2215,7 +2607,9 @@ async function cmdMsgSend(positional: string[], flags: Record<string, string>): 
   const text = positional.slice(1).join(" ");
   if (!chatId || !text) die("Usage: tellatio msg send <chat> <text> [--reply-to N] [--silent] [--no-preview]");
 
+  assertIdentifierAllowed(chatId, "send messages to");
   const entity = await resolveEntity(chatId);
+  assertEntityAllowed(entity, "send messages to");
   const replyTo = flags["reply-to"] ? parseInt(flags["reply-to"], 10) : undefined;
   const silent = flags["silent"] === "true";
   const noWebpage = flags["no-preview"] === "true";
@@ -2235,7 +2629,9 @@ async function cmdMsgEdit(positional: string[]): Promise<void> {
   const text = positional.slice(2).join(" ");
   if (!chatId || !msgId || !text) die("Usage: tellatio msg edit <chat> <msg-id> <text>");
 
+  assertIdentifierAllowed(chatId, "edit messages in");
   const entity = await resolveEntity(chatId);
+  assertEntityAllowed(entity, "edit messages in");
   const result = await client.editMessage(entity, {
     message: parseInt(msgId, 10),
     text,
@@ -2248,7 +2644,9 @@ async function cmdMsgDelete(positional: string[], flags: Record<string, string>)
   const msgIds = positional.slice(1).map((id) => parseInt(id, 10));
   if (!chatId || msgIds.length === 0) die("Usage: tellatio msg delete <chat> <msg-id> [msg-id...] [--revoke]");
 
+  assertIdentifierAllowed(chatId, "delete messages in");
   const entity = await resolveEntity(chatId);
+  assertEntityAllowed(entity, "delete messages in");
   const revoke = flags["revoke"] === "true";
   await client.deleteMessages(entity, msgIds, { revoke });
   out({ deleted: msgIds });
@@ -2260,8 +2658,12 @@ async function cmdMsgForward(positional: string[]): Promise<void> {
   const msgIds = positional.slice(2).map((id) => parseInt(id, 10));
   if (!fromChat || !toChat || msgIds.length === 0) die("Usage: tellatio msg forward <from-chat> <to-chat> <msg-id> [msg-id...]");
 
+  assertIdentifierAllowed(fromChat, "forward messages from");
+  assertIdentifierAllowed(toChat, "forward messages to");
   const fromEntity = await resolveEntity(fromChat);
   const toEntity = await resolveEntity(toChat);
+  assertEntityAllowed(fromEntity, "forward messages from");
+  assertEntityAllowed(toEntity, "forward messages to");
   const result = await client.forwardMessages(toEntity, { messages: msgIds, fromPeer: fromEntity });
   out((result as Api.Message[]).map((m) => serializeMessage(m)));
 }
@@ -2272,7 +2674,10 @@ async function cmdMsgSearch(positional: string[], flags: Record<string, string>)
   if (!chatId || !query) die("Usage: tellatio msg search <chat> <query> [--limit N]");
 
   const limit = numFlag(flags, "limit", 20);
+  assertIdentifierAllowed(chatId, "search messages from");
   const entity = await resolveEntity(chatId);
+  assertEntityAllowed(entity, "search messages from");
+  const banList = loadCliBanList();
 
   const result = await client.invoke(new Api.messages.Search({
     peer: await client.getInputEntity(entity),
@@ -2291,6 +2696,7 @@ async function cmdMsgSearch(positional: string[], flags: Record<string, string>)
   if (result instanceof Api.messages.Messages || result instanceof Api.messages.MessagesSlice || result instanceof Api.messages.ChannelMessages) {
     const msgs = result.messages
       .filter((m): m is Api.Message => m instanceof Api.Message)
+      .filter((m) => !isMessageFromBannedUser(m, banList))
       .map((m) => serializeMessage(m));
     out(msgs);
   } else {
@@ -2303,7 +2709,9 @@ async function cmdMsgPin(positional: string[], flags: Record<string, string>): P
   const msgId = positional[1];
   if (!chatId || !msgId) die("Usage: tellatio msg pin <chat> <msg-id> [--silent]");
 
+  assertIdentifierAllowed(chatId, "pin messages in");
   const entity = await resolveEntity(chatId);
+  assertEntityAllowed(entity, "pin messages in");
   const silent = flags["silent"] === "true";
   await client.pinMessage(entity, parseInt(msgId, 10), { notify: !silent });
   out({ pinned: parseInt(msgId, 10) });
@@ -2314,7 +2722,9 @@ async function cmdMsgUnpin(positional: string[]): Promise<void> {
   const msgId = positional[1];
   if (!chatId || !msgId) die("Usage: tellatio msg unpin <chat> <msg-id>");
 
+  assertIdentifierAllowed(chatId, "unpin messages in");
   const entity = await resolveEntity(chatId);
+  assertEntityAllowed(entity, "unpin messages in");
   await client.invoke(new Api.messages.UpdatePinnedMessage({
     peer: await client.getInputEntity(entity),
     id: parseInt(msgId, 10),
@@ -2328,7 +2738,9 @@ async function cmdMsgSchedule(positional: string[], flags: Record<string, string
   const text = positional.slice(1).join(" ");
   if (!chatId || !text || !flags["at"]) die("Usage: tellatio msg schedule <chat> <text> --at <YYYY-MM-DDTHH:MM> [--reply-to N]");
 
+  assertIdentifierAllowed(chatId, "schedule messages to");
   const entity = await resolveEntity(chatId);
+  assertEntityAllowed(entity, "schedule messages to");
   const replyTo = flags["reply-to"] ? parseInt(flags["reply-to"], 10) : undefined;
 
   // Parse --at as ISO datetime
@@ -2347,7 +2759,9 @@ async function cmdMsgScheduleList(positional: string[]): Promise<void> {
   const chatId = positional[0];
   if (!chatId) die("Usage: tellatio msg schedule-list <chat>");
 
+  assertIdentifierAllowed(chatId, "list scheduled messages for");
   const entity = await resolveEntity(chatId);
+  assertEntityAllowed(entity, "list scheduled messages for");
   const result = await client.invoke(new Api.messages.GetScheduledHistory({
     peer: await client.getInputEntity(entity) as unknown as Api.TypeInputPeer,
     hash: BigInt(0) as any,
@@ -2368,7 +2782,9 @@ async function cmdMsgScheduleDelete(positional: string[]): Promise<void> {
   const msgIds = positional.slice(1).map((id) => parseInt(id, 10));
   if (!chatId || msgIds.length === 0) die("Usage: tellatio msg schedule-delete <chat> <msg-id> [msg-id...]");
 
+  assertIdentifierAllowed(chatId, "delete scheduled messages for");
   const entity = await resolveEntity(chatId);
+  assertEntityAllowed(entity, "delete scheduled messages for");
   await client.invoke(new Api.messages.DeleteScheduledMessages({
     peer: await client.getInputEntity(entity) as unknown as Api.TypeInputPeer,
     id: msgIds,
@@ -2380,7 +2796,9 @@ async function cmdMsgMarkRead(positional: string[], flags: Record<string, string
   const chatId = positional[0];
   if (!chatId) die("Usage: tellatio msg mark-read <chat> [--max-id N]");
 
+  assertIdentifierAllowed(chatId, "mark read");
   const entity = await resolveEntity(chatId);
+  assertEntityAllowed(entity, "mark read");
   const maxId = numFlag(flags, "max-id", 0);
   await client.markAsRead(entity, maxId || undefined);
   out({ markedRead: chatId });
@@ -2389,10 +2807,12 @@ async function cmdMsgMarkRead(positional: string[], flags: Record<string, string
 // ── contacts ────────────────────────────────────────────────────
 
 async function cmdContactsList(): Promise<void> {
+  const banList = loadCliBanList();
   const result = await client.invoke(new Api.contacts.GetContacts({ hash: BigInt(0) as any }));
   if (result instanceof Api.contacts.Contacts) {
     const users = result.users
       .filter((u): u is Api.User => u instanceof Api.User)
+      .filter((u) => !matchBannedEntity(banList, u))
       .map((u) => serializeUser(u));
     out(users);
   } else {
@@ -2474,7 +2894,9 @@ async function cmdGroupCreate(positional: string[], flags: Record<string, string
 async function cmdGroupInfo(positional: string[]): Promise<void> {
   const chatId = positional[0];
   if (!chatId) die("Usage: tellatio group info <chat>");
+  assertIdentifierAllowed(chatId, "inspect group");
   const entity = await resolveEntity(chatId);
+  assertEntityAllowed(entity, "inspect group");
 
   const info = serializeChat(entity);
 
@@ -2501,11 +2923,14 @@ async function cmdGroupMembers(positional: string[], flags: Record<string, strin
   if (!chatId) die("Usage: tellatio group members <chat> [--limit N]");
 
   const limit = numFlag(flags, "limit", 200);
+  const banList = loadCliBanList();
   const entity = await resolveEntity(chatId);
+  assertEntityAllowed(entity, "list members for");
   const participants = await client.getParticipants(entity, { limit });
 
   const members = participants
     .filter((u): u is Api.User => u instanceof Api.User)
+    .filter((u) => !matchBannedEntity(banList, u))
     .map((u) => serializeUser(u));
   out(members);
 }
@@ -2515,8 +2940,12 @@ async function cmdGroupAdd(positional: string[]): Promise<void> {
   const userId = positional[1];
   if (!chatId || !userId) die("Usage: tellatio group add <chat> <user>");
 
+  assertIdentifierAllowed(chatId, "add members to");
+  assertIdentifierAllowed(userId, "add banned users to groups");
   const chatEntity = await resolveEntity(chatId);
   const userEntity = await resolveEntity(userId);
+  assertEntityAllowed(chatEntity, "add members to");
+  assertEntityAllowed(userEntity, "add banned users to groups");
 
   if (chatEntity instanceof Api.Channel) {
     await client.invoke(new Api.channels.InviteToChannel({
@@ -2538,8 +2967,10 @@ async function cmdGroupKick(positional: string[]): Promise<void> {
   const userId = positional[1];
   if (!chatId || !userId) die("Usage: tellatio group kick <chat> <user>");
 
+  assertIdentifierAllowed(chatId, "remove members from");
   const chatEntity = await resolveEntity(chatId);
   const userEntity = await resolveEntity(userId);
+  assertEntityAllowed(chatEntity, "remove members from");
 
   if (chatEntity instanceof Api.Channel) {
     await client.invoke(new Api.channels.EditBanned({
@@ -2564,7 +2995,9 @@ async function cmdGroupTitle(positional: string[]): Promise<void> {
   const title = positional.slice(1).join(" ");
   if (!chatId || !title) die("Usage: tellatio group title <chat> <new-title>");
 
+  assertIdentifierAllowed(chatId, "edit group title for");
   const entity = await resolveEntity(chatId);
+  assertEntityAllowed(entity, "edit group title for");
 
   if (entity instanceof Api.Channel) {
     await client.invoke(new Api.channels.EditTitle({
@@ -2584,7 +3017,9 @@ async function cmdGroupLeave(positional: string[]): Promise<void> {
   const chatId = positional[0];
   if (!chatId) die("Usage: tellatio group leave <chat>");
 
+  assertIdentifierAllowed(chatId, "leave");
   const entity = await resolveEntity(chatId);
+  assertEntityAllowed(entity, "leave");
 
   if (entity instanceof Api.Channel) {
     await client.invoke(new Api.channels.LeaveChannel({
@@ -2605,7 +3040,9 @@ async function cmdGroupDescription(positional: string[]): Promise<void> {
   const about = positional.slice(1).join(" ");
   if (!chatId) die("Usage: tellatio group description <chat> <text>");
 
+  assertIdentifierAllowed(chatId, "edit group description for");
   const entity = await resolveEntity(chatId);
+  assertEntityAllowed(entity, "edit group description for");
 
   await client.invoke(new Api.messages.EditChatAbout({
     peer: await client.getInputEntity(entity) as unknown as Api.TypeInputPeer,
@@ -2624,7 +3061,9 @@ async function cmdMediaSend(positional: string[], flags: Record<string, string>)
 
   if (!fs.existsSync(filePath)) die(`File not found: ${filePath}`);
 
+  assertIdentifierAllowed(chatId, "send media to");
   const entity = await resolveEntity(chatId);
+  assertEntityAllowed(entity, "send media to");
   const voiceNote = flags["voice"] === "true";
   const videoNote = flags["video-note"] === "true";
 
@@ -2643,7 +3082,9 @@ async function cmdMediaDownload(positional: string[]): Promise<void> {
   const outputPath = positional[2];
   if (!chatId || !msgId || !outputPath) die("Usage: tellatio media download <chat> <msg-id> <output-path>");
 
+  assertIdentifierAllowed(chatId, "download media from");
   const entity = await resolveEntity(chatId);
+  assertEntityAllowed(entity, "download media from");
   const messages = await client.getMessages(entity, { ids: [parseInt(msgId, 10)] });
   if (messages.length === 0) die("Message not found");
 
@@ -2686,7 +3127,9 @@ async function cmdDraftSet(positional: string[]): Promise<void> {
   const text = positional.slice(1).join(" ");
   if (!chatId) die("Usage: tellatio draft set <chat> <text>");
 
+  assertIdentifierAllowed(chatId, "set drafts for");
   const entity = await resolveEntity(chatId);
+  assertEntityAllowed(entity, "set drafts for");
   await client.invoke(new Api.messages.SaveDraft({
     peer: await client.getInputEntity(entity) as unknown as Api.TypeInputPeer,
     message: text || "",
@@ -2698,7 +3141,9 @@ async function cmdDraftClear(positional: string[]): Promise<void> {
   const chatId = positional[0];
   if (!chatId) die("Usage: tellatio draft clear <chat>");
 
+  assertIdentifierAllowed(chatId, "clear drafts for");
   const entity = await resolveEntity(chatId);
+  assertEntityAllowed(entity, "clear drafts for");
   await client.invoke(new Api.messages.SaveDraft({
     peer: await client.getInputEntity(entity) as unknown as Api.TypeInputPeer,
     message: "",
@@ -2741,6 +3186,7 @@ function envCheck(): DoctorCheck {
       data: {
         syncSource: config.syncSource,
         folderName: config.folderName,
+        banFolderName: config.banFolderName,
         associationObject: config.associationObjectSlug,
         identityObject: config.identityObjectSlug,
         folderFallbackEnabled: config.folderFallbackEnabled,
@@ -3288,6 +3734,35 @@ const identities = Cli.create("identities", { description: "Resolve Telegram use
     }))),
   });
 
+const bans = Cli.create("bans", { description: "Manage the Telegram folder-backed ban list" })
+  .command("list", {
+    description: "List Telegram peers blocked from read, discovery, and sync workflows",
+    run: () => runTelegram(cmdBansList),
+  })
+  .command("add", {
+    description: "Add a Telegram peer to the ban folder",
+    args: z.object({ user: z.string().describe("Telegram username, @handle, t.me link, or numeric chat/user ID") }),
+    options: z.object({
+      reason: z.string().optional().describe("Short reason included in command output"),
+      dryRun: z.boolean().default(false).describe("Preview without changing the Telegram ban folder"),
+    }),
+    run: (c) => runTelegram(() => cmdBansAdd([c.args.user], commandFlags({
+      reason: c.options.reason,
+      "dry-run": c.options.dryRun,
+    }))),
+  })
+  .command("remove", {
+    description: "Remove a Telegram peer from the ban folder",
+    args: z.object({ user: z.string().describe("Telegram username, @handle, t.me link, or numeric chat/user ID") }),
+    options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing the Telegram ban folder") }),
+    run: (c) => runTelegram(() => cmdBansRemove([c.args.user], commandFlags({ "dry-run": c.options.dryRun }))),
+  })
+  .command("check", {
+    description: "Check whether a Telegram peer is in the ban folder",
+    args: z.object({ user: z.string().describe("Telegram username, @handle, t.me link, or numeric chat/user ID") }),
+    run: (c) => runTelegram(() => cmdBansCheck([c.args.user])),
+  });
+
 const msg = Cli.create("msg", { description: "Read and manage Telegram messages" })
   .command("read", {
     description: "Read messages from a chat",
@@ -3599,6 +4074,7 @@ const cli = Cli.create("tellatio", {
   .command(discover)
   .command(associations)
   .command(identities)
+  .command(bans)
   .command(msg)
   .command(contacts)
   .command(group)

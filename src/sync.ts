@@ -13,6 +13,14 @@ import { computeStrength } from "./strength";
 import type { Config } from "./config";
 import type { TelegramMessage } from "./telegram";
 import type { TelegramAssociation } from "./association";
+import {
+  compileBanList,
+  describeBannedUser,
+  matchBannedTelegramChat,
+  matchBannedTelegramUser,
+  parseEnvBannedUsers,
+  type BanList,
+} from "./bans";
 
 function todayUTC(): string {
   return new Date().toISOString().slice(0, 10);
@@ -105,11 +113,18 @@ async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, label: s
  */
 export async function runSync(config: Config): Promise<void> {
   const state = loadState(config.dataDir);
+  const banList = compileBanList([
+    ...parseEnvBannedUsers(),
+    ...await telegram.getBanFolderUsers(config.banFolderName),
+  ]);
   const me = await telegram.getMe();
 
   console.log(`[sync] Starting sync cycle. Source: ${config.syncSource}`);
+  if (banList.users.length > 0) {
+    console.log(`[sync] Ban list active for ${banList.users.length} Telegram peer(s)`);
+  }
 
-  const syncChats = await getSyncChats(config);
+  const syncChats = await getSyncChats(config, banList);
   if (syncChats.length === 0) {
     console.log("[sync] No chats selected for sync.");
     setRunState(state, "sync", {
@@ -128,7 +143,7 @@ export async function runSync(config: Config): Promise<void> {
   for (const [index, syncChat] of syncChats.entries()) {
     console.log(`[sync] Checking chat ${index + 1}/${syncChats.length}: ${syncChat.chatInfo.title} (${syncChat.chatInfo.idStr})`);
     try {
-      const result = await fetchChat(state, syncChat, me, config);
+      const result = await fetchChat(state, syncChat, me, config, banList);
       if (result) fetched.push(result);
     } catch (err) {
       console.error(`[sync] Error fetching chat ${syncChat.chatInfo.title} (${syncChat.chatInfo.idStr}):`, err);
@@ -194,16 +209,16 @@ export async function runSync(config: Config): Promise<void> {
   console.log("[sync] Cycle complete");
 }
 
-async function getSyncChats(config: Config): Promise<SyncChat[]> {
+async function getSyncChats(config: Config, banList: BanList): Promise<SyncChat[]> {
   if (config.syncSource === "folder") {
-    return getFolderSyncChats(config.folderName);
+    return getFolderSyncChats(config.folderName, banList);
   }
 
   try {
     const associations = await attio.listApprovedTelegramAssociations(config.associationObjectSlug);
     if (associations.length === 0) {
       console.log(`[sync] No approved associations found in ${config.associationObjectSlug}`);
-      return config.folderFallbackEnabled ? getFolderSyncChats(config.folderName) : [];
+      return config.folderFallbackEnabled ? getFolderSyncChats(config.folderName, banList) : [];
     }
 
     const recentChats = await telegram.getRecentChats(config.discoveryDialogLimit);
@@ -214,6 +229,11 @@ async function getSyncChats(config: Config): Promise<SyncChat[]> {
       const recent = recentById.get(association.telegramChatId);
       if (!recent) {
         console.warn(`[sync] Approved chat not found in recent dialogs: ${association.telegramChatTitle} (${association.telegramChatId})`);
+        continue;
+      }
+      const banned = matchBannedChat(recent.chatInfo, banList);
+      if (banned) {
+        console.warn(`[sync] Skipping banned chat ${recent.chatInfo.title} (${recent.chatInfo.idStr}) matched ${describeBannedUser(banned)}`);
         continue;
       }
 
@@ -227,11 +247,11 @@ async function getSyncChats(config: Config): Promise<SyncChat[]> {
     return selected;
   } catch (err) {
     console.error(`[sync] Failed to load approved associations from ${config.associationObjectSlug}:`, err);
-    return config.folderFallbackEnabled ? getFolderSyncChats(config.folderName) : [];
+    return config.folderFallbackEnabled ? getFolderSyncChats(config.folderName, banList) : [];
   }
 }
 
-async function getFolderSyncChats(folderName: string): Promise<SyncChat[]> {
+async function getFolderSyncChats(folderName: string, banList: BanList): Promise<SyncChat[]> {
   console.log(`[sync] Loading legacy Telegram folder: "${folderName}"`);
   const peers = await telegram.getFolderChatIds(folderName);
   const chats: SyncChat[] = [];
@@ -239,6 +259,11 @@ async function getFolderSyncChats(folderName: string): Promise<SyncChat[]> {
   for (const peer of peers) {
     const chatInfo = await telegram.resolveChat(peer);
     if (!chatInfo) continue;
+    const banned = matchBannedChat(chatInfo, banList);
+    if (banned) {
+      console.warn(`[sync] Skipping banned folder chat ${chatInfo.title} (${chatInfo.idStr}) matched ${describeBannedUser(banned)}`);
+      continue;
+    }
     chats.push({ peer, chatInfo });
   }
 
@@ -250,8 +275,14 @@ async function fetchChat(
   syncChat: SyncChat,
   me: { idStr: string; firstName: string },
   config: Config,
+  banList: BanList,
 ): Promise<ChatFetchResult | null> {
   const { peer, chatInfo, association } = syncChat;
+  const banned = matchBannedChat(chatInfo, banList);
+  if (banned) {
+    console.warn(`[sync] Refusing to fetch banned chat ${chatInfo.title} (${chatInfo.idStr}) matched ${describeBannedUser(banned)}`);
+    return null;
+  }
 
   const chatState = getChatState(state, chatInfo.idStr);
   const allMessages = await withTimeout(
@@ -261,7 +292,15 @@ async function fetchChat(
   );
   if (allMessages.length === 0) return null;
 
-  const messages = completedDayMessages(allMessages);
+  const completedMessages = completedDayMessages(allMessages);
+  const messages = completedMessages.filter((msg) => !matchBannedTelegramUser(banList, {
+    userIdStr: msg.senderIdStr,
+    username: msg.senderUsername,
+  }));
+  const skippedBannedMessages = completedMessages.length - messages.length;
+  if (skippedBannedMessages > 0) {
+    console.warn(`[sync] Skipped ${skippedBannedMessages} banned sender message(s) in ${chatInfo.title}`);
+  }
   if (messages.length === 0) return null;
 
   console.log(`[sync] Fetched ${messages.length} msgs from ${chatInfo.title}`);
@@ -274,12 +313,39 @@ async function fetchChat(
   }
 
   if (chatInfo.isGroup) {
-    const participants = await telegram.getGroupParticipants(peer);
+    const participants = (await telegram.getGroupParticipants(peer)).filter((participant) => {
+      const participantMatch = matchBannedTelegramUser(banList, {
+        userIdStr: participant.userIdStr,
+        username: participant.username,
+      });
+      if (participantMatch) {
+        console.warn(`[sync] Skipping banned group participant ${participant.username ? `@${participant.username}` : participant.userIdStr} matched ${describeBannedUser(participantMatch)}`);
+        return false;
+      }
+      return true;
+    });
     return { peer, chatInfo, association, messages, stored, participants };
   } else {
     const userInfo = await telegram.getUserInfo(peer);
+    const userMatch = matchBannedTelegramUser(banList, {
+      userIdStr: userInfo.userIdStr || chatInfo.idStr,
+      username: userInfo.username || chatInfo.username,
+    });
+    if (userMatch) {
+      console.warn(`[sync] Refusing to queue banned DM ${chatInfo.title} (${chatInfo.idStr}) matched ${describeBannedUser(userMatch)}`);
+      return null;
+    }
     return { peer, chatInfo, association, messages, stored, userInfo };
   }
+}
+
+function matchBannedChat(chatInfo: telegram.ChatInfo, banList: BanList) {
+  return matchBannedTelegramChat(banList, {
+    chatId: chatInfo.idStr,
+    chatType: chatInfo.type,
+    userIdStr: chatInfo.type === "dm" ? chatInfo.idStr : undefined,
+    username: chatInfo.username,
+  });
 }
 
 async function queueDMWork(

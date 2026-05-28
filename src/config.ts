@@ -4,6 +4,7 @@ export interface Config {
   telegramSession: string;
   attioApiKey: string;
   folderName: string;
+  banFolderName: string;
   syncSource: "associations" | "folder";
   associationObjectSlug: string;
   identityObjectSlug: string;
@@ -72,6 +73,7 @@ export function loadConfig(): Config {
     telegramSession: requireEnv("TELEGRAM_SESSION"),
     attioApiKey: requireEnv("ATTIO_API_KEY"),
     folderName: process.env["TELEGRAM_FOLDER_NAME"] || "Attio",
+    banFolderName: process.env["TELLATIO_BAN_FOLDER_NAME"] || "Banned",
     syncSource: loadSyncSource(),
     associationObjectSlug: process.env["TELLATIO_ASSOCIATION_OBJECT"] || "telegram_associations",
     identityObjectSlug: process.env["TELLATIO_IDENTITY_OBJECT"] || "telegram_identities",

@@ -21,6 +21,8 @@ Tellatio brings your Telegram conversations into [Attio](https://attio.com) — 
 
 **Matching**: The new default source of truth is the `telegram_associations` Attio custom object for chats and the `telegram_identities` object for Telegram user -> Attio Person mappings. Legacy folder sync can still be enabled with `TELLATIO_SYNC_SOURCE=folder`, but ambiguous people now go to identity review instead of being blindly created. The resolver also reads Telegram profile descriptions, so "BD at 0x" or "ecosystem @ symbiotic" can help associate both a person and a group chat with the right Attio record.
 
+**Bans**: Tellatio uses a Telegram folder named `Banned` by default as the no-sync/no-read list. Chats in that folder are skipped by discovery, identity reconciliation, message reads/searches, and sync. Add or remove entries with `tellatio bans add <chat>` and `tellatio bans remove <chat>`; do not use the folder as a sync source.
+
 ## How to use it
 
 ### 1. Create the Attio schema
@@ -63,6 +65,13 @@ Useful review commands:
 tellatio associations status --json
 tellatio identities status --json
 tellatio identities candidates --name "Piotr" --json
+```
+
+Ban a Telegram account or chat before running discovery/sync:
+
+```bash
+tellatio bans add @jpsaly0wn --json
+tellatio bans check @jpsaly0wn --json
 ```
 
 Manual approval:
@@ -188,6 +197,7 @@ TELLATIO_AUTO_CREATE_PEOPLE=false
 TELLATIO_AUTO_CREATE_GROUP_PEOPLE=false
 TELLATIO_FOLDER_FALLBACK_ENABLED=false
 TELLATIO_CHAT_FETCH_TIMEOUT_SECONDS=30
+TELLATIO_BAN_FOLDER_NAME=Banned
 SYNC_INTERVAL_MINUTES=15
 DATA_DIR=./data
 ```
@@ -213,6 +223,7 @@ TELLATIO_AUTO_CREATE_GROUP_PEOPLE=false
 TELLATIO_FOLDER_FALLBACK_ENABLED=false
 TELLATIO_DISCOVERY_DIALOG_LIMIT=1000
 TELLATIO_CHAT_FETCH_TIMEOUT_SECONDS=30
+TELLATIO_BAN_FOLDER_NAME=Banned
 SYNC_INTERVAL_SECONDS=900
 DATA_DIR=/data
 ```
@@ -268,6 +279,10 @@ identities status                               Identity counts and records
 identities reconcile [--since X]                Resolve Telegram users to Attio People (--dry-run supported)
 identities candidates [--name/--username X]     Search People candidates
 identities upsert --telegram-user-id ...        Create/update a person identity mapping (--dry-run supported)
+bans list                                       List folder-backed banned chats/users
+bans add <chat>                                 Add a chat/user to the no-sync ban folder
+bans remove <chat>                              Remove a chat/user from the ban folder
+bans check <chat>                               Check if a chat/user is banned
 
 msg read <chat> [--limit N] [--since X]         Read messages (--until, --date)
 msg send <chat> <text> [--reply-to N]           Send (--silent, --no-preview)

@@ -26,6 +26,7 @@
     "src/sync.ts",
     "src/association.ts",
     "src/identity.ts",
+    "src/bans.ts",
     "src/phone.ts",
     "src/state.ts",
     "src/strength.ts",
