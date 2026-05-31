@@ -30,6 +30,7 @@
     "src/phone.ts",
     "src/state.ts",
     "src/strength.ts",
+    "src/guard.ts",
     "src/cli.ts"
   ],
   "exclude": ["node_modules", "dist"]

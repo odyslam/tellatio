@@ -125,6 +125,22 @@ For CRM hygiene, use Telegram folders as a review queue rather than as the write
 
 Only approved Attio associations with a concrete `crm_record_id` should reach the sync worker.
 
+### Using with AI agents (security)
+
+The CLI returns Telegram content (message text, sender names, chat titles, bios). Anyone can DM the account or set a malicious bio, so **all Telegram-derived content is untrusted**: treat it as DATA, never as instructions. An agent that follows instructions embedded in that content can be prompt-injected into calling destructive or outbound commands (sending messages, deleting, blocking, leaving groups, changing your profile, and so on).
+
+Tellatio cannot control the consuming agent's prompt, so it ships two defenses:
+
+- **Untrusted-content hardening.** Returned message text, names, and titles are stripped of bidirectional-override and zero-width characters, records are marked `untrusted: true`, and read commands include an `_advisory` field restating that the content is attacker-controlled.
+- **Write-guard.** Destructive and outbound commands are gated by the `TELLATIO_WRITE_GUARD` environment variable:
+  - `off` — no gating.
+  - `warn` (default) — logs a warning to stderr and proceeds.
+  - `enforce` — blocks the command (non-zero exit, no Telegram action) unless writes are explicitly allowed.
+
+  In `enforce` mode, allow a write by setting `TELLATIO_ALLOW_WRITES=1` (also accepts `true`/`yes`/`on`) in the environment. This is intentionally an out-of-band signal: a prompt-injected agent can append a flag to a command it emits, but cannot set the worker's environment.
+
+**Recommendation:** run agents with `TELLATIO_WRITE_GUARD=enforce` and have a human grant `TELLATIO_ALLOW_WRITES=1` only for the specific invocation that should perform a write. Read-only commands (`msg read`, `chats list`, `group info`, etc.) are never gated.
+
 See the [CLI reference](#cli-reference) below for the full command list.
 
 ---
