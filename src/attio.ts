@@ -13,12 +13,14 @@ import {
   type TelegramIdentityInput,
 } from "./identity";
 
-const BASE_URL = `${process.env["ATTIO_API_BASE_URL"] || "https://api.attio.com"}/v2`;
-
 let apiKey: string;
 
 export function initAttio(key: string): void {
   apiKey = key;
+}
+
+function baseUrl(): string {
+  return `${(process.env["ATTIO_API_BASE_URL"] || "https://api.attio.com").replace(/\/+$/, "")}/v2`;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -43,7 +45,7 @@ async function attioFetch(path: string, options: RequestInit = {}): Promise<Resp
   while (attempt < maxAttempts) {
     attempt += 1;
     try {
-      const res = await fetch(`${BASE_URL}${path}`, {
+      const res = await fetch(`${baseUrl()}${path}`, {
         ...options,
         headers: {
           Authorization: `Bearer ${apiKey}`,
