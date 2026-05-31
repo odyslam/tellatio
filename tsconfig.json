@@ -21,6 +21,8 @@
   "include": [
     "src/index.ts",
     "src/config.ts",
+    "src/secret.ts",
+    "src/proxy.ts",
     "src/telegram.ts",
     "src/attio.ts",
     "src/sync.ts",

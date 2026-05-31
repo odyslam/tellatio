@@ -16,6 +16,7 @@ import { Logger, LogLevel } from "telegram/extensions/Logger";
 import { StringSession } from "telegram/sessions";
 import { Api } from "telegram";
 import { loadConfig } from "./config";
+import { installProxyFromEnv } from "./proxy";
 import { normalizeAssociationName, suggestAssociation } from "./association";
 import * as attio from "./attio";
 import type { AssociationSuggestion, TelegramAssociation } from "./association";
@@ -4093,5 +4094,9 @@ const cli = Cli.create("tellatio", {
   .command(media)
   .command(profile)
   .command(draft);
+
+// Load .env and route HTTP egress through iron (if configured) before any command runs.
+loadEnv();
+installProxyFromEnv();
 
 cli.serve();
