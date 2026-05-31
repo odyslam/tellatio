@@ -21,6 +21,8 @@
   "include": [
     "src/index.ts",
     "src/config.ts",
+    "src/secret.ts",
+    "src/proxy.ts",
     "src/telegram.ts",
     "src/attio.ts",
     "src/sync.ts",
@@ -29,6 +31,7 @@
     "src/bans.ts",
     "src/phone.ts",
     "src/state.ts",
+    "src/db.ts",
     "src/strength.ts",
     "src/guard.ts",
     "src/cli.ts"

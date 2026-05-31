@@ -1,0 +1,71 @@
+# Example topology: Tellatio worker behind the iron.sh (iron-proxy) egress firewall.
+#
+# This is a REFERENCE example, not a turnkey deployment. You must:
+#   - Pin the real iron-proxy image/tag (see the `iron` service comment).
+#   - Provide real secret files under ./secrets/ (gitignored).
+#   - Review iron.policy.yaml against https://docs.iron.sh before going live.
+#
+# The worker's HTTP egress (Attio) is forced through iron via HTTPS_PROXY.
+# iron enforces default-deny egress, injects the Attio Bearer key, and
+# allowlists Telegram's MTProto DCs. The Telegram session is NOT injected by
+# iron (MTProto is not an HTTP credential) - it is loaded from a secret file.
+
+services:
+  iron:
+    # Placeholder image - pin the real iron-proxy image and tag you trust.
+    # See https://docs.iron.sh for releases.
+    image: ghcr.io/iron-sh/iron-proxy:latest
+    restart: unless-stopped
+    volumes:
+      # Egress policy (default-deny + Attio key injection + Telegram allowlist).
+      - ./iron.policy.yaml:/etc/iron/policy.yaml:ro
+    # iron listens on 8080 here; keep this in sync with HTTPS_PROXY below
+    # and with any listen port configured in iron.policy.yaml.
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - iron
+    # Drop to the non-root user baked into the image.
+    user: "node"
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      # Route all HTTP egress through iron (port must match the iron service).
+      HTTPS_PROXY: "http://iron:8080"
+      # Secrets are mounted as files; *_FILE beats the plaintext env var.
+      ATTIO_API_KEY_FILE: "/run/secrets/attio_api_key"
+      TELEGRAM_SESSION_FILE: "/run/secrets/telegram_session"
+      # Non-secret configuration.
+      TELLATIO_SYNC_SOURCE: "associations"
+      TELLATIO_ASSOCIATION_OBJECT: "telegram_associations"
+      TELLATIO_IDENTITY_OBJECT: "telegram_identities"
+      TELLATIO_AUTO_CREATE_PEOPLE: "false"
+      TELLATIO_AUTO_CREATE_GROUP_PEOPLE: "false"
+      TELLATIO_FOLDER_FALLBACK_ENABLED: "false"
+      TELLATIO_DISCOVERY_DIALOG_LIMIT: "1000"
+      TELLATIO_CHAT_FETCH_TIMEOUT_SECONDS: "30"
+      TELLATIO_BAN_FOLDER_NAME: "Banned"
+      SYNC_INTERVAL_SECONDS: "900"
+      DATA_DIR: "/data"
+    secrets:
+      - attio_api_key
+      - telegram_session
+    volumes:
+      # Persistent sync state, writable while the rootfs stays read-only.
+      - tellatio_data:/data
+
+secrets:
+  # File-based secrets. These ./secrets/*.txt paths are gitignored examples -
+  # replace with your real secret files (or wire up your orchestrator's secrets).
+  attio_api_key:
+    file: ./secrets/attio_api_key.txt
+  telegram_session:
+    file: ./secrets/telegram_session.txt
+
+volumes:
+  tellatio_data:

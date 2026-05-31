@@ -228,6 +228,8 @@ pnpm dev
 
 The repo includes a Dockerfile. Deploy to Railway and attach a volume at `/data` for persistent sync state.
 
+Sync state is stored in a SQLite database at `<DATA_DIR>/sync-state.db` (written incrementally, in WAL mode, so a crash mid-cycle cannot corrupt it). On first start, any pre-existing `sync-state.json` in `DATA_DIR` is imported once into SQLite and renamed to `sync-state.json.imported-<timestamp>` as a backup. The import is automatic and idempotent; `tellatio doctor` reports the DB path, schema version, and migration status. Do not run an older JSON-based build against a `DATA_DIR` that has already been migrated.
+
 Recommended Railway worker settings:
 
 ```
@@ -247,6 +249,43 @@ DATA_DIR=/data
 Use a dedicated Railway `TELEGRAM_SESSION`. Do not reuse the local/Codex session in Railway.
 
 The worker runs sync cycles serially, so a slow Telegram cycle will not overlap with the next interval. Each chat fetch has a timeout, and the worker logs the chat being checked so stale or inaccessible approved associations can be identified without blocking the whole process indefinitely.
+
+### Secrets & deployment hardening
+
+Tellatio handles two secrets: `TELEGRAM_SESSION` (an MTProto session string used
+locally) and `ATTIO_API_KEY` (an HTTP Bearer key). The goal of this section is to
+shrink their blast radius.
+
+**File-based secret loading.** Every secret can be supplied via a `*_FILE` env var
+pointing at a file instead of a plaintext env var. `${NAME}_FILE` takes precedence
+over `${NAME}`: e.g. `ATTIO_API_KEY_FILE=/run/secrets/attio_api_key` is read
+(trimmed) instead of `ATTIO_API_KEY`. This applies to `TELEGRAM_SESSION`,
+`ATTIO_API_KEY`, `TELEGRAM_API_HASH`, and `TELEGRAM_API_ID`. This keeps secrets
+out of the process environment and shell history, and lets you mount them as
+container/orchestrator secret files.
+
+**Egress firewall (iron-proxy).** The repo ships an example `docker-compose.yml`
+and `iron.policy.yaml` for running the worker behind the [iron.sh](https://docs.iron.sh)
+egress firewall. iron enforces default-deny egress: the worker's HTTP egress is
+forced through it via `HTTPS_PROXY=http://iron:8080` (Node's global `fetch` honors
+this through an undici `ProxyAgent`). iron allowlists `api.attio.com` and injects
+the Attio Bearer key, so the worker never holds the raw Attio key for HTTP calls.
+The worker container also runs as the non-root `node` user with a read-only root
+filesystem and a writable `/data` volume.
+
+**Telegram MTProto caveat.** The Telegram session is an MTProto credential, not an
+HTTP Bearer token, so iron *cannot* inject it. Instead it is loaded from a secret
+file (`TELEGRAM_SESSION_FILE`) and its egress is contained: `iron.policy.yaml`
+allowlists Telegram's data-center CIDRs but does not inject the session. Residual
+risk remains: a compromised worker can still use the loaded session to reach the
+allowlisted Telegram DCs, so treat the session as sensitive and rotate it if a
+host is compromised.
+
+**Railway note.** On Railway, run iron as a separate egress service and point the
+worker at it via `HTTPS_PROXY`. Provide the Telegram session through a Railway
+secret file / mounted secret consumed via `TELEGRAM_SESSION_FILE` (and the Attio
+key via `ATTIO_API_KEY_FILE`, or let iron inject it). Continue to use a dedicated
+Railway `TELEGRAM_SESSION`, and do not reuse the local/Codex session.
 
 ---
 

@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadConfig } from "./config";
+import { installProxyFromEnv } from "./proxy";
 import { initAttio } from "./attio";
 import * as telegram from "./telegram";
 import { runSync } from "./sync";
@@ -32,6 +33,7 @@ function loadEnv(): void {
 
 async function main(): Promise<void> {
   loadEnv();
+  installProxyFromEnv();
   console.log("Tellatio — Telegram → Attio Sync Service");
 
   const config = loadConfig();

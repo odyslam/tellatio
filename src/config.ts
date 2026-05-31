@@ -1,3 +1,5 @@
+import { requireSecret } from "./secret";
+
 export interface Config {
   telegramApiId: number;
   telegramApiHash: string;
@@ -62,16 +64,16 @@ function loadSyncIntervalSeconds(): number {
 }
 
 export function loadConfig(): Config {
-  const apiId = Number.parseInt(requireEnv("TELEGRAM_API_ID"), 10);
+  const apiId = Number.parseInt(requireSecret("TELEGRAM_API_ID"), 10);
   if (!Number.isFinite(apiId)) {
     throw new Error("TELEGRAM_API_ID must be a number");
   }
 
   return {
     telegramApiId: apiId,
-    telegramApiHash: requireEnv("TELEGRAM_API_HASH"),
-    telegramSession: requireEnv("TELEGRAM_SESSION"),
-    attioApiKey: requireEnv("ATTIO_API_KEY"),
+    telegramApiHash: requireSecret("TELEGRAM_API_HASH"),
+    telegramSession: requireSecret("TELEGRAM_SESSION"),
+    attioApiKey: requireSecret("ATTIO_API_KEY"),
     folderName: process.env["TELEGRAM_FOLDER_NAME"] || "Attio",
     banFolderName: process.env["TELLATIO_BAN_FOLDER_NAME"] || "Banned",
     syncSource: loadSyncSource(),

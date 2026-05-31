@@ -2,13 +2,7 @@ import { Api } from "telegram";
 import * as telegram from "./telegram";
 import * as attio from "./attio";
 import { normalizePhone } from "./phone";
-import {
-  loadState, saveState, getChatState, setChatState,
-  addInteractions, getInteractions,
-  setRunState,
-  appendToTranscript, getTranscript,
-  type SyncState, type StoredMessage,
-} from "./state";
+import { openState, type StateStore, type StoredMessage } from "./state";
 import { computeStrength } from "./strength";
 import type { Config } from "./config";
 import type { TelegramMessage } from "./telegram";
@@ -69,6 +63,7 @@ function toStoredMessages(
   myName: string,
 ): StoredMessage[] {
   return messages.map((msg) => ({
+    id: msg.id,
     date: msg.date,
     sender: msg.senderIdStr === myIdStr ? myName : msg.senderName,
     text: msg.text,
@@ -112,101 +107,103 @@ async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, label: s
  * 2. Write to Attio in parallel per person
  */
 export async function runSync(config: Config): Promise<void> {
-  const state = loadState(config.dataDir);
-  const banList = compileBanList([
-    ...parseEnvBannedUsers(),
-    ...await telegram.getBanFolderUsers(config.banFolderName),
-  ]);
-  const me = await telegram.getMe();
+  const store = openState(config.dataDir);
+  try {
+    const banList = compileBanList([
+      ...parseEnvBannedUsers(),
+      ...await telegram.getBanFolderUsers(config.banFolderName),
+    ]);
+    const me = await telegram.getMe();
 
-  console.log(`[sync] Starting sync cycle. Source: ${config.syncSource}`);
-  if (banList.users.length > 0) {
-    console.log(`[sync] Ban list active for ${banList.users.length} Telegram peer(s)`);
-  }
-
-  const syncChats = await getSyncChats(config, banList);
-  if (syncChats.length === 0) {
-    console.log("[sync] No chats selected for sync.");
-    setRunState(state, "sync", {
-      status: "success",
-      finishedAt: new Date().toISOString(),
-      counts: { selectedChats: 0, fetchedChats: 0, recordWork: 0 },
-    });
-    saveState(config.dataDir, state);
-    return;
-  }
-
-  console.log(`[sync] Found ${syncChats.length} selected chats`);
-
-  // Phase 1: Batch-fetch from Telegram
-  const fetched: ChatFetchResult[] = [];
-  for (const [index, syncChat] of syncChats.entries()) {
-    console.log(`[sync] Checking chat ${index + 1}/${syncChats.length}: ${syncChat.chatInfo.title} (${syncChat.chatInfo.idStr})`);
-    try {
-      const result = await fetchChat(state, syncChat, me, config, banList);
-      if (result) fetched.push(result);
-    } catch (err) {
-      console.error(`[sync] Error fetching chat ${syncChat.chatInfo.title} (${syncChat.chatInfo.idStr}):`, err);
-    }
-  }
-
-  if (fetched.length === 0) {
-    console.log("[sync] No new messages across any chats.");
-    setRunState(state, "sync", {
-      status: "success",
-      finishedAt: new Date().toISOString(),
-      counts: { selectedChats: syncChats.length, fetchedChats: 0, recordWork: 0 },
-    });
-    saveState(config.dataDir, state);
-    return;
-  }
-
-  console.log(`[sync] ${fetched.length} chats with new messages. Writing to Attio...`);
-
-  // Phase 2: Process all Attio writes
-  // Collect all (recordId → work) so we can parallelize per-person
-  const recordWork = new Map<string, Array<() => Promise<void>>>();
-
-  for (const chat of fetched) {
-    if (chat.association) {
-      queueAssociatedWork(chat, state, recordWork);
-    } else if (chat.chatInfo.isGroup) {
-      await queueGroupWork(chat, me, state, recordWork, config);
-    } else {
-      await queueDMWork(chat, state, recordWork, config);
+    console.log(`[sync] Starting sync cycle. Source: ${config.syncSource}`);
+    if (banList.users.length > 0) {
+      console.log(`[sync] Ban list active for ${banList.users.length} Telegram peer(s)`);
     }
 
-    // Update chat sync state
-    const maxId = Math.max(...chat.messages.map((m) => m.id));
-    const lastDate = dateOfMessage(chat.messages[chat.messages.length - 1].date);
-    setChatState(state, chat.chatInfo.idStr, { lastMessageId: maxId, lastSyncedDate: lastDate });
-  }
+    const syncChats = await getSyncChats(config, banList);
+    if (syncChats.length === 0) {
+      console.log("[sync] No chats selected for sync.");
+      store.setRunState("sync", {
+        status: "success",
+        finishedAt: new Date().toISOString(),
+        counts: { selectedChats: 0, fetchedChats: 0, recordWork: 0 },
+      });
+      return;
+    }
 
-  // Execute Attio writes — parallel across persons, sequential within each person
-  const CONCURRENCY = 5;
-  const entries = Array.from(recordWork.entries());
-  for (let i = 0; i < entries.length; i += CONCURRENCY) {
-    const batch = entries.slice(i, i + CONCURRENCY);
-    await Promise.all(
-      batch.map(async ([recordKey, tasks]) => {
-        for (const task of tasks) {
-          try {
-            await task();
-          } catch (err) {
-            console.error(`[sync] Attio write failed for ${recordKey}:`, err);
+    console.log(`[sync] Found ${syncChats.length} selected chats`);
+
+    // Phase 1: Batch-fetch from Telegram
+    const fetched: ChatFetchResult[] = [];
+    for (const [index, syncChat] of syncChats.entries()) {
+      console.log(`[sync] Checking chat ${index + 1}/${syncChats.length}: ${syncChat.chatInfo.title} (${syncChat.chatInfo.idStr})`);
+      try {
+        const result = await fetchChat(store, syncChat, me, config, banList);
+        if (result) fetched.push(result);
+      } catch (err) {
+        console.error(`[sync] Error fetching chat ${syncChat.chatInfo.title} (${syncChat.chatInfo.idStr}):`, err);
+      }
+    }
+
+    if (fetched.length === 0) {
+      console.log("[sync] No new messages across any chats.");
+      store.setRunState("sync", {
+        status: "success",
+        finishedAt: new Date().toISOString(),
+        counts: { selectedChats: syncChats.length, fetchedChats: 0, recordWork: 0 },
+      });
+      return;
+    }
+
+    console.log(`[sync] ${fetched.length} chats with new messages. Writing to Attio...`);
+
+    // Phase 2: Process all Attio writes
+    // Collect all (recordId → work) so we can parallelize per-person
+    const recordWork = new Map<string, Array<() => Promise<void>>>();
+
+    for (const chat of fetched) {
+      if (chat.association) {
+        queueAssociatedWork(chat, store, recordWork);
+      } else if (chat.chatInfo.isGroup) {
+        await queueGroupWork(chat, me, store, recordWork, config);
+      } else {
+        await queueDMWork(chat, store, recordWork, config);
+      }
+
+      // Update chat sync state. Transcript appends are deduped by Telegram message id,
+      // so even if a crash leaves chat state behind a write the next cycle is safe.
+      const maxId = Math.max(...chat.messages.map((m) => m.id));
+      const lastDate = dateOfMessage(chat.messages[chat.messages.length - 1].date);
+      store.setChatState(chat.chatInfo.idStr, { lastMessageId: maxId, lastSyncedDate: lastDate });
+    }
+
+    // Execute Attio writes — parallel across persons, sequential within each person
+    const CONCURRENCY = 5;
+    const entries = Array.from(recordWork.entries());
+    for (let i = 0; i < entries.length; i += CONCURRENCY) {
+      const batch = entries.slice(i, i + CONCURRENCY);
+      await Promise.all(
+        batch.map(async ([recordKey, tasks]) => {
+          for (const task of tasks) {
+            try {
+              await task();
+            } catch (err) {
+              console.error(`[sync] Attio write failed for ${recordKey}:`, err);
+            }
           }
-        }
-      }),
-    );
-  }
+        }),
+      );
+    }
 
-  setRunState(state, "sync", {
-    status: "success",
-    finishedAt: new Date().toISOString(),
-    counts: { selectedChats: syncChats.length, fetchedChats: fetched.length, recordWork: entries.length },
-  });
-  saveState(config.dataDir, state);
-  console.log("[sync] Cycle complete");
+    store.setRunState("sync", {
+      status: "success",
+      finishedAt: new Date().toISOString(),
+      counts: { selectedChats: syncChats.length, fetchedChats: fetched.length, recordWork: entries.length },
+    });
+    console.log("[sync] Cycle complete");
+  } finally {
+    store.close();
+  }
 }
 
 async function getSyncChats(config: Config, banList: BanList): Promise<SyncChat[]> {
@@ -271,7 +268,7 @@ async function getFolderSyncChats(folderName: string, banList: BanList): Promise
 }
 
 async function fetchChat(
-  state: SyncState,
+  store: StateStore,
   syncChat: SyncChat,
   me: { idStr: string; firstName: string },
   config: Config,
@@ -284,7 +281,7 @@ async function fetchChat(
     return null;
   }
 
-  const chatState = getChatState(state, chatInfo.idStr);
+  const chatState = store.getChatState(chatInfo.idStr);
   const allMessages = await withTimeout(
     telegram.getMessages(peer, chatState.lastMessageId),
     config.chatFetchTimeoutSeconds * 1000,
@@ -350,7 +347,7 @@ function matchBannedChat(chatInfo: telegram.ChatInfo, banList: BanList) {
 
 async function queueDMWork(
   chat: ChatFetchResult,
-  state: SyncState,
+  store: StateStore,
   recordWork: Map<string, Array<() => Promise<void>>>,
   config: Config,
 ): Promise<void> {
@@ -376,20 +373,20 @@ async function queueDMWork(
   const recordId = person.recordId;
   const noteTitle = `Telegram · ${chat.chatInfo.title}`;
 
-  appendToTranscript(state, recordId, chat.chatInfo.idStr, noteTitle, chat.stored);
-  trackInteractions(state, recordId, chat.stored);
+  store.appendToTranscript(recordId, chat.chatInfo.idStr, noteTitle, chat.stored);
+  trackInteractions(store, recordId, chat.stored);
 
   const key = recordKey("people", recordId);
   if (!recordWork.has(key)) recordWork.set(key, []);
   recordWork.get(key)!.push(
-    () => upsertChatNote(state, "people", recordId, chat.chatInfo.idStr),
-    () => updatePersonStats(state, recordId),
+    () => upsertChatNote(store, "people", recordId, chat.chatInfo.idStr),
+    () => updatePersonStats(store, recordId),
   );
 }
 
 function queueAssociatedWork(
   chat: ChatFetchResult,
-  state: SyncState,
+  store: StateStore,
   recordWork: Map<string, Array<() => Promise<void>>>,
 ): void {
   if (!chat.association) return;
@@ -397,10 +394,10 @@ function queueAssociatedWork(
   const { targetObject, targetRecordId, syncMode } = chat.association;
   const noteTitle = `Telegram · ${chat.chatInfo.title}`;
 
-  appendToTranscript(state, targetRecordId, chat.chatInfo.idStr, noteTitle, chat.stored);
+  store.appendToTranscript(targetRecordId, chat.chatInfo.idStr, noteTitle, chat.stored);
 
   if (targetObject === "people") {
-    trackInteractions(state, targetRecordId, chat.stored);
+    trackInteractions(store, targetRecordId, chat.stored);
   }
 
   const key = recordKey(targetObject, targetRecordId);
@@ -408,19 +405,19 @@ function queueAssociatedWork(
 
   if (syncMode !== "stats") {
     recordWork.get(key)!.push(
-      () => upsertChatNote(state, targetObject, targetRecordId, chat.chatInfo.idStr),
+      () => upsertChatNote(store, targetObject, targetRecordId, chat.chatInfo.idStr),
     );
   }
 
   if (targetObject === "people") {
-    recordWork.get(key)!.push(() => updatePersonStats(state, targetRecordId));
+    recordWork.get(key)!.push(() => updatePersonStats(store, targetRecordId));
   }
 }
 
 async function queueGroupWork(
   chat: ChatFetchResult,
   me: { idStr: string; firstName: string },
-  state: SyncState,
+  store: StateStore,
   recordWork: Map<string, Array<() => Promise<void>>>,
   config: Config,
 ): Promise<void> {
@@ -455,14 +452,14 @@ async function queueGroupWork(
 
     const noteTitle = `Telegram · [${chat.chatInfo.title}]`;
 
-    appendToTranscript(state, recordId, chat.chatInfo.idStr, noteTitle, chat.stored);
-    trackInteractions(state, recordId, chat.stored);
+    store.appendToTranscript(recordId, chat.chatInfo.idStr, noteTitle, chat.stored);
+    trackInteractions(store, recordId, chat.stored);
 
     const key = recordKey("people", recordId);
     if (!recordWork.has(key)) recordWork.set(key, []);
     recordWork.get(key)!.push(
-      () => upsertChatNote(state, "people", recordId, chat.chatInfo.idStr),
-      () => updatePersonStats(state, recordId),
+      () => upsertChatNote(store, "people", recordId, chat.chatInfo.idStr),
+      () => updatePersonStats(store, recordId),
     );
   }
 
@@ -475,24 +472,24 @@ function recordKey(parentObject: string, recordId: string): string {
   return `${parentObject}:${recordId}`;
 }
 
-function trackInteractions(state: SyncState, recordId: string, messages: StoredMessage[]): void {
+function trackInteractions(store: StateStore, recordId: string, messages: StoredMessage[]): void {
   const byDay = new Map<string, number>();
   for (const msg of messages) {
     const date = dateOfMessage(msg.date);
     byDay.set(date, (byDay.get(date) || 0) + 1);
   }
   for (const [date, count] of byDay) {
-    addInteractions(state, recordId, date, count);
+    store.addInteractions(recordId, date, count);
   }
 }
 
 async function upsertChatNote(
-  state: SyncState,
+  store: StateStore,
   parentObject: string,
   recordId: string,
   chatId: string,
 ): Promise<void> {
-  const transcript = getTranscript(state, recordId, chatId);
+  const transcript = store.getTranscript(recordId, chatId);
   if (!transcript || transcript.messages.length === 0) return;
 
   const content = formatTranscript(transcript.messages);
@@ -501,8 +498,8 @@ async function upsertChatNote(
   await attio.upsertNote(recordId, transcript.title, content, createdAt, parentObject);
 }
 
-async function updatePersonStats(state: SyncState, recordId: string): Promise<void> {
-  const interactions = getInteractions(state, recordId);
+async function updatePersonStats(store: StateStore, recordId: string): Promise<void> {
+  const interactions = store.getInteractions(recordId);
   if (interactions.length === 0) return;
 
   const sorted = [...interactions].sort((a, b) => a.date.localeCompare(b.date));
