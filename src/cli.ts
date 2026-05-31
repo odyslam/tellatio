@@ -25,7 +25,7 @@ import {
   identityUsername,
   type TelegramIdentityInput,
 } from "./identity";
-import { loadState, saveState, setRunState, type RunState, type SyncState } from "./state";
+import { openState, type StateStore, type RunState } from "./state";
 import {
   compileBanList,
   describeBannedUser,
@@ -180,18 +180,20 @@ function assertNotBanFolderName(name: string, operation: string): void {
   }
 }
 
-function loadLocalState(): { dataDir: string; state: SyncState } {
+function openLocalState(): { dataDir: string; store: StateStore } {
   const dataDir = dataDirFromEnv();
-  return { dataDir, state: loadState(dataDir) };
+  return { dataDir, store: openState(dataDir) };
 }
 
 function recordRunState(name: string, run: RunState): void {
+  let store: StateStore | undefined;
   try {
-    const { dataDir, state } = loadLocalState();
-    setRunState(state, name, run);
-    saveState(dataDir, state);
+    store = openLocalState().store;
+    store.setRunState(name, run);
   } catch {
     // Run metadata is useful for doctor, but should not make the primary command fail.
+  } finally {
+    store?.close();
   }
 }
 
@@ -3334,22 +3336,30 @@ async function railwayDoctorCheck(): Promise<DoctorCheck> {
 }
 
 function stateDoctorCheck(): DoctorCheck {
+  let store: StateStore | undefined;
   try {
-    const { dataDir, state } = loadLocalState();
-    const chatStates = Object.entries(state.chats || {});
-    const latestChat = chatStates
-      .map(([chatId, chat]) => ({ chatId, ...chat }))
-      .sort((a, b) => b.lastSyncedDate.localeCompare(a.lastSyncedDate) || b.lastMessageId - a.lastMessageId)[0];
+    const local = openLocalState();
+    store = local.store;
+    const chatStates = store.getAllChatStates();
+    const latestChat = [...chatStates].sort(
+      (a, b) => b.lastSyncedDate.localeCompare(a.lastSyncedDate) || b.lastMessageId - a.lastMessageId,
+    )[0];
+    const migration = store.getMigrationInfo();
 
     return {
       name: "state",
-      status: "pass",
-      detail: "loaded local sync state",
+      status: migration.legacyJsonReappeared ? "warn" : "pass",
+      detail: migration.legacyJsonReappeared
+        ? "sync-state.json reappeared after migration — did the old build run? Its writes are ignored."
+        : "loaded local sync state",
       data: {
-        dataDir,
+        dataDir: local.dataDir,
+        dbPath: migration.dbPath,
+        schemaVersion: migration.schemaVersion,
+        jsonMigrated: migration.jsonMigrated,
         chatCount: chatStates.length,
         latestChat,
-        runs: state.runs || {},
+        runs: store.getAllRuns(),
       },
     };
   } catch (err) {
@@ -3358,6 +3368,8 @@ function stateDoctorCheck(): DoctorCheck {
       status: "warn",
       detail: errorMessage(err),
     };
+  } finally {
+    store?.close();
   }
 }
 

@@ -212,6 +212,8 @@ pnpm dev
 
 The repo includes a Dockerfile. Deploy to Railway and attach a volume at `/data` for persistent sync state.
 
+Sync state is stored in a SQLite database at `<DATA_DIR>/sync-state.db` (written incrementally, in WAL mode, so a crash mid-cycle cannot corrupt it). On first start, any pre-existing `sync-state.json` in `DATA_DIR` is imported once into SQLite and renamed to `sync-state.json.imported-<timestamp>` as a backup. The import is automatic and idempotent; `tellatio doctor` reports the DB path, schema version, and migration status. Do not run an older JSON-based build against a `DATA_DIR` that has already been migrated.
+
 Recommended Railway worker settings:
 
 ```

@@ -29,6 +29,7 @@
     "src/bans.ts",
     "src/phone.ts",
     "src/state.ts",
+    "src/db.ts",
     "src/strength.ts",
     "src/cli.ts"
   ],
