@@ -37,6 +37,7 @@ import {
   type BanList,
   type BannedTelegramUser,
 } from "./bans";
+import { evaluateWriteGuard, sanitizeUntrusted, sanitizeUntrustedValue, UNTRUSTED_ADVISORY } from "./guard";
 
 const execFileAsync = promisify(execFile);
 
@@ -79,7 +80,7 @@ function die(msg: string): never {
 }
 
 function out(data: unknown): void {
-  commandOutput = data;
+  commandOutput = sanitizeUntrustedValue(data);
 }
 
 function numFlag(flags: Record<string, string>, name: string, def: number): number {
@@ -98,6 +99,16 @@ async function runTelegram(operation: () => Promise<void>): Promise<unknown> {
   } finally {
     await disconnect();
   }
+}
+
+async function runTelegramWrite(operation: string, fn: () => Promise<void>): Promise<unknown> {
+  assertWritesAllowed(operation);
+  return runTelegram(fn);
+}
+
+async function runTelegramMaybeWrite(operation: string, shouldGuard: boolean, fn: () => Promise<void>): Promise<unknown> {
+  if (shouldGuard) assertWritesAllowed(operation);
+  return runTelegram(fn);
 }
 
 async function runAttio(operation: () => Promise<void>): Promise<unknown> {
@@ -358,6 +369,24 @@ function assertEntityAllowed(entity: unknown, operation: string): void {
   }
 }
 
+function assertWritesAllowed(operation: string): void {
+  const decision = evaluateWriteGuard(operation);
+  if (decision.mode === "off") return;
+  if (decision.mode === "enforce" && !decision.allowed) {
+    die(
+      `Refusing to ${operation}: write-guard is in enforce mode. ` +
+        `Set TELLATIO_ALLOW_WRITES=1 in the environment to allow this destructive operation.`,
+    );
+  }
+  if (decision.mode === "warn") {
+    console.error(
+      "[write-guard] WARNING: performing destructive operation: " +
+        operation +
+        " (set TELLATIO_WRITE_GUARD=enforce to require confirmation)",
+    );
+  }
+}
+
 function isMessageFromBannedUser(message: Api.Message, banList: BanList): boolean {
   if (message.sender instanceof Api.User) {
     return Boolean(matchBannedTelegramUser(banList, {
@@ -490,8 +519,8 @@ async function resolveEntityFromDialogFilters(identifier: string): Promise<unkno
 function serializeUser(u: Api.User): Record<string, unknown> {
   return {
     id: u.id.toString(),
-    firstName: u.firstName,
-    lastName: u.lastName,
+    firstName: sanitizeUntrusted(u.firstName) || undefined,
+    lastName: sanitizeUntrusted(u.lastName) || undefined,
     username: u.username,
     phone: u.phone,
     bot: u.bot,
@@ -502,14 +531,14 @@ function serializeUser(u: Api.User): Record<string, unknown> {
 }
 
 function serializeChat(c: any): Record<string, unknown> {
-  if (c instanceof Api.User) return { type: "user", ...serializeUser(c) };
+  if (c instanceof Api.User) return { type: "user", untrusted: true, ...serializeUser(c) };
   if (c instanceof Api.Chat) return {
-    type: "chat", id: c.id.toString(), title: c.title,
+    type: "chat", untrusted: true, id: c.id.toString(), title: sanitizeUntrusted(c.title),
     participantsCount: c.participantsCount,
   };
   if (c instanceof Api.Channel) return {
-    type: c.megagroup ? "supergroup" : "channel",
-    id: c.id.toString(), title: c.title, username: c.username,
+    type: c.megagroup ? "supergroup" : "channel", untrusted: true,
+    id: c.id.toString(), title: sanitizeUntrusted(c.title), username: c.username,
     participantsCount: c.participantsCount,
   };
   return { type: "unknown", id: String((c as any).id) };
@@ -932,13 +961,14 @@ function serializeMessage(m: Api.Message): Record<string, unknown> {
   }
 
   return {
+    untrusted: true,
     id: m.id,
     date: m.date,
     dateISO: new Date(m.date * 1000).toISOString(),
     senderId: m.senderId?.toString(),
     senderUsername,
-    senderName,
-    text: m.text || m.message || "",
+    senderName: sanitizeUntrusted(senderName),
+    text: sanitizeUntrusted(m.text || m.message || ""),
     out: m.out,
     replyToMsgId: m.replyTo instanceof Api.MessageReplyHeader ? m.replyTo.replyToMsgId : undefined,
     hasMedia: !!m.media && !(m.media instanceof Api.MessageMediaEmpty),
@@ -970,7 +1000,7 @@ async function cmdChatsList(flags: Record<string, string>): Promise<void> {
     id: dialogCanonicalId(d) || "",
     canonicalId: entityIdString(d.entity) || dialogCanonicalId(d) || "",
     dialogId: d.id?.toString(),
-    name: d.name || d.title,
+    name: sanitizeUntrusted(d.name || d.title),
     isGroup: d.isGroup,
     isChannel: d.isChannel,
     isUser: d.isUser,
@@ -978,10 +1008,10 @@ async function cmdChatsList(flags: Record<string, string>): Promise<void> {
     lastMessage: d.message ? {
       id: d.message.id,
       date: d.message.date,
-      text: d.message.text || d.message.message || "",
+      text: sanitizeUntrusted(d.message.text || d.message.message || ""),
     } : null,
   }));
-  out(results);
+  out({ _advisory: UNTRUSTED_ADVISORY, untrusted: true, chats: results });
 }
 
 async function cmdChatsSearch(positional: string[], flags: Record<string, string>): Promise<void> {
@@ -999,7 +1029,7 @@ async function cmdChatsSearch(positional: string[], flags: Record<string, string
   for (const c of result.chats) {
     entities.push(serializeChat(c as Api.User | Api.Chat | Api.Channel));
   }
-  out(entities);
+  out({ _advisory: UNTRUSTED_ADVISORY, untrusted: true, results: entities });
 }
 
 async function cmdChatsInfo(positional: string[]): Promise<void> {
@@ -1068,7 +1098,7 @@ async function cmdChatsUnread(flags: Record<string, string>): Promise<void> {
       id: dialogCanonicalId(d) || "",
       canonicalId: entityIdString(d.entity) || dialogCanonicalId(d) || "",
       dialogId: d.id?.toString(),
-      name: d.name || d.title,
+      name: sanitizeUntrusted(d.name || d.title),
       isGroup: d.isGroup,
       isChannel: d.isChannel,
       unreadCount: d.unreadCount,
@@ -1076,7 +1106,7 @@ async function cmdChatsUnread(flags: Record<string, string>): Promise<void> {
         id: d.message.id,
         date: d.message.date,
         dateISO: new Date(d.message.date * 1000).toISOString(),
-        text: d.message.text || d.message.message || "",
+        text: sanitizeUntrusted(d.message.text || d.message.message || ""),
       } : null,
     }));
   out(unread);
@@ -2602,7 +2632,7 @@ async function cmdMsgRead(positional: string[], flags: Record<string, string>): 
   if (sinceTs) messages = messages.filter((m) => m.date >= sinceTs);
   if (untilTs) messages = messages.filter((m) => m.date <= untilTs);
 
-  out(messages.map((m) => serializeMessage(m)));
+  out({ _advisory: UNTRUSTED_ADVISORY, untrusted: true, messages: messages.map((m) => serializeMessage(m)) });
 }
 
 async function cmdMsgSend(positional: string[], flags: Record<string, string>): Promise<void> {
@@ -2701,9 +2731,9 @@ async function cmdMsgSearch(positional: string[], flags: Record<string, string>)
       .filter((m): m is Api.Message => m instanceof Api.Message)
       .filter((m) => !isMessageFromBannedUser(m, banList))
       .map((m) => serializeMessage(m));
-    out(msgs);
+    out({ _advisory: UNTRUSTED_ADVISORY, untrusted: true, messages: msgs });
   } else {
-    out([]);
+    out({ _advisory: UNTRUSTED_ADVISORY, untrusted: true, messages: [] });
   }
 }
 
@@ -3475,7 +3505,7 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
       color: z.number().optional().describe("Telegram folder color ID"),
       dryRun: z.boolean().default(false).describe("Preview without changing Telegram"),
     }),
-    run: (c) => runTelegram(() => cmdFoldersCreate([c.args.name], commandFlags(c.options))),
+    run: (c) => runTelegramMaybeWrite("create folder", !c.options.dryRun, () => cmdFoldersCreate([c.args.name], commandFlags(c.options))),
   })
   .command("rename", {
     description: "Rename a Telegram folder",
@@ -3484,13 +3514,13 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
       to: z.string().describe("New folder name"),
     }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
-    run: (c) => runTelegram(() => cmdFoldersRename([c.args.from, c.args.to, c.options.dryRun ? "dry-run" : ""])),
+    run: (c) => runTelegramMaybeWrite("rename folder", !c.options.dryRun, () => cmdFoldersRename([c.args.from, c.args.to, c.options.dryRun ? "dry-run" : ""])),
   })
   .command("delete", {
     description: "Delete a Telegram folder",
     args: z.object({ name: z.string().describe("Folder name") }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
-    run: (c) => runTelegram(() => cmdFoldersDelete([c.args.name, c.options.dryRun ? "dry-run" : ""])),
+    run: (c) => runTelegramMaybeWrite("delete folder", !c.options.dryRun, () => cmdFoldersDelete([c.args.name, c.options.dryRun ? "dry-run" : ""])),
   })
   .command("add", {
     description: "Add chats to a Telegram folder",
@@ -3499,7 +3529,7 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
       chat: z.string().describe("Chat identifier, or comma-separated chat identifiers"),
     }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
-    run: (c) => runTelegram(() => cmdFoldersAdd([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
+    run: (c) => runTelegramMaybeWrite("add chats to folder", !c.options.dryRun, () => cmdFoldersAdd([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
   })
   .command("remove", {
     description: "Remove chats from a Telegram folder",
@@ -3508,7 +3538,7 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
       chat: z.string().describe("Chat identifier, or comma-separated chat identifiers"),
     }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
-    run: (c) => runTelegram(() => cmdFoldersRemove([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
+    run: (c) => runTelegramMaybeWrite("remove chats from folder", !c.options.dryRun, () => cmdFoldersRemove([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
   })
   .command("pin", {
     description: "Pin chats inside a Telegram folder",
@@ -3517,7 +3547,7 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
       chat: z.string().describe("Chat identifier, or comma-separated chat identifiers"),
     }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
-    run: (c) => runTelegram(() => cmdFoldersPin([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
+    run: (c) => runTelegramMaybeWrite("pin chats in folder", !c.options.dryRun, () => cmdFoldersPin([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
   })
   .command("unpin", {
     description: "Unpin chats inside a Telegram folder",
@@ -3526,7 +3556,7 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
       chat: z.string().describe("Chat identifier, or comma-separated chat identifiers"),
     }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
-    run: (c) => runTelegram(() => cmdFoldersUnpin([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
+    run: (c) => runTelegramMaybeWrite("unpin chats in folder", !c.options.dryRun, () => cmdFoldersUnpin([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
   })
   .command("exclude-add", {
     description: "Explicitly exclude chats from a source-based Telegram folder",
@@ -3535,7 +3565,7 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
       chat: z.string().describe("Chat identifier, or comma-separated chat identifiers"),
     }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
-    run: (c) => runTelegram(() => cmdFoldersExcludeAdd([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
+    run: (c) => runTelegramMaybeWrite("exclude chats from folder", !c.options.dryRun, () => cmdFoldersExcludeAdd([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
   })
   .command("exclude-remove", {
     description: "Remove chats from a folder's explicit exclusions",
@@ -3544,7 +3574,7 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
       chat: z.string().describe("Chat identifier, or comma-separated chat identifiers"),
     }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
-    run: (c) => runTelegram(() => cmdFoldersExcludeRemove([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
+    run: (c) => runTelegramMaybeWrite("remove folder exclusions", !c.options.dryRun, () => cmdFoldersExcludeRemove([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
   })
   .command("sources", {
     description: "Edit built-in folder sources and exclusions",
@@ -3560,7 +3590,7 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
       excludeArchived: z.string().optional().describe("true/false"),
       dryRun: z.boolean().default(false).describe("Preview without changing Telegram"),
     }),
-    run: (c) => runTelegram(() => cmdFoldersSources([c.args.folder], commandFlags({
+    run: (c) => runTelegramMaybeWrite("edit folder sources", !c.options.dryRun, () => cmdFoldersSources([c.args.folder], commandFlags({
       contacts: c.options.contacts,
       "non-contacts": c.options.nonContacts,
       groups: c.options.groups,
@@ -3576,7 +3606,7 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
     description: "Move named folders to the front in the given order",
     args: z.object({ order: z.string().describe("Comma-separated folder names in desired leading order") }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
-    run: (c) => runTelegram(() => cmdFoldersReorder([c.args.order], commandFlags({ "dry-run": c.options.dryRun }))),
+    run: (c) => runTelegramMaybeWrite("reorder folders", !c.options.dryRun, () => cmdFoldersReorder([c.args.order], commandFlags({ "dry-run": c.options.dryRun }))),
   });
 
 const discover = Cli.create("discover", { description: "Find likely Telegram to Attio associations" })
@@ -3759,7 +3789,7 @@ const bans = Cli.create("bans", { description: "Manage the Telegram folder-backe
       reason: z.string().optional().describe("Short reason included in command output"),
       dryRun: z.boolean().default(false).describe("Preview without changing the Telegram ban folder"),
     }),
-    run: (c) => runTelegram(() => cmdBansAdd([c.args.user], commandFlags({
+    run: (c) => runTelegramMaybeWrite("add ban", !c.options.dryRun, () => cmdBansAdd([c.args.user], commandFlags({
       reason: c.options.reason,
       "dry-run": c.options.dryRun,
     }))),
@@ -3768,7 +3798,7 @@ const bans = Cli.create("bans", { description: "Manage the Telegram folder-backe
     description: "Remove a Telegram peer from the ban folder",
     args: z.object({ user: z.string().describe("Telegram username, @handle, t.me link, or numeric chat/user ID") }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing the Telegram ban folder") }),
-    run: (c) => runTelegram(() => cmdBansRemove([c.args.user], commandFlags({ "dry-run": c.options.dryRun }))),
+    run: (c) => runTelegramMaybeWrite("remove ban", !c.options.dryRun, () => cmdBansRemove([c.args.user], commandFlags({ "dry-run": c.options.dryRun }))),
   })
   .command("check", {
     description: "Check whether a Telegram peer is in the ban folder",
@@ -3808,7 +3838,7 @@ const msg = Cli.create("msg", { description: "Read and manage Telegram messages"
       silent: z.boolean().default(false).describe("Send without notification"),
       noPreview: z.boolean().default(false).describe("Disable webpage preview"),
     }),
-    run: (c) => runTelegram(() => cmdMsgSend([c.args.chat, c.args.text], commandFlags({
+    run: (c) => runTelegramWrite("send message", () => cmdMsgSend([c.args.chat, c.args.text], commandFlags({
       "reply-to": c.options.replyTo,
       silent: c.options.silent,
       "no-preview": c.options.noPreview,
@@ -3821,7 +3851,7 @@ const msg = Cli.create("msg", { description: "Read and manage Telegram messages"
       msgId: z.string().describe("Message ID"),
       text: z.string().describe("New message text; quote it if it contains spaces"),
     }),
-    run: (c) => runTelegram(() => cmdMsgEdit([c.args.chat, c.args.msgId, c.args.text])),
+    run: (c) => runTelegramWrite("edit message", () => cmdMsgEdit([c.args.chat, c.args.msgId, c.args.text])),
   })
   .command("delete", {
     description: "Delete one or more messages",
@@ -3830,7 +3860,7 @@ const msg = Cli.create("msg", { description: "Read and manage Telegram messages"
       msgIds: z.string().describe("Comma-separated message IDs"),
     }),
     options: z.object({ revoke: z.boolean().default(false).describe("Delete for everyone where supported") }),
-    run: (c) => runTelegram(() => cmdMsgDelete([c.args.chat, ...csv(c.args.msgIds)], commandFlags(c.options))),
+    run: (c) => runTelegramWrite("delete messages", () => cmdMsgDelete([c.args.chat, ...csv(c.args.msgIds)], commandFlags(c.options))),
   })
   .command("forward", {
     description: "Forward one or more messages",
@@ -3839,7 +3869,7 @@ const msg = Cli.create("msg", { description: "Read and manage Telegram messages"
       toChat: z.string().describe("Destination chat"),
       msgIds: z.string().describe("Comma-separated message IDs"),
     }),
-    run: (c) => runTelegram(() => cmdMsgForward([c.args.fromChat, c.args.toChat, ...csv(c.args.msgIds)])),
+    run: (c) => runTelegramWrite("forward messages", () => cmdMsgForward([c.args.fromChat, c.args.toChat, ...csv(c.args.msgIds)])),
   })
   .command("search", {
     description: "Search messages in a chat",
@@ -3857,7 +3887,7 @@ const msg = Cli.create("msg", { description: "Read and manage Telegram messages"
       msgId: z.string().describe("Message ID"),
     }),
     options: z.object({ silent: z.boolean().default(false).describe("Pin without notification") }),
-    run: (c) => runTelegram(() => cmdMsgPin([c.args.chat, c.args.msgId], commandFlags(c.options))),
+    run: (c) => runTelegramWrite("pin message", () => cmdMsgPin([c.args.chat, c.args.msgId], commandFlags(c.options))),
   })
   .command("unpin", {
     description: "Unpin a message",
@@ -3865,13 +3895,13 @@ const msg = Cli.create("msg", { description: "Read and manage Telegram messages"
       chat: z.string().describe("Username, phone, or numeric chat ID"),
       msgId: z.string().describe("Message ID"),
     }),
-    run: (c) => runTelegram(() => cmdMsgUnpin([c.args.chat, c.args.msgId])),
+    run: (c) => runTelegramWrite("unpin message", () => cmdMsgUnpin([c.args.chat, c.args.msgId])),
   })
   .command("mark-read", {
     description: "Mark a chat as read",
     args: z.object({ chat: z.string().describe("Username, phone, or numeric chat ID") }),
     options: z.object({ maxId: z.number().default(0).describe("Maximum message ID to mark as read") }),
-    run: (c) => runTelegram(() => cmdMsgMarkRead([c.args.chat], commandFlags({ "max-id": c.options.maxId }))),
+    run: (c) => runTelegramWrite("mark read", () => cmdMsgMarkRead([c.args.chat], commandFlags({ "max-id": c.options.maxId }))),
   })
   .command("schedule", {
     description: "Schedule a message",
@@ -3883,7 +3913,7 @@ const msg = Cli.create("msg", { description: "Read and manage Telegram messages"
       at: z.string().describe("Future datetime, for example 2026-05-06T15:30"),
       replyTo: z.number().optional().describe("Message ID to reply to"),
     }),
-    run: (c) => runTelegram(() => cmdMsgSchedule([c.args.chat, c.args.text], commandFlags({
+    run: (c) => runTelegramWrite("schedule message", () => cmdMsgSchedule([c.args.chat, c.args.text], commandFlags({
       at: c.options.at,
       "reply-to": c.options.replyTo,
     }))),
@@ -3899,7 +3929,7 @@ const msg = Cli.create("msg", { description: "Read and manage Telegram messages"
       chat: z.string().describe("Username, phone, or numeric chat ID"),
       msgIds: z.string().describe("Comma-separated scheduled message IDs"),
     }),
-    run: (c) => runTelegram(() => cmdMsgScheduleDelete([c.args.chat, ...csv(c.args.msgIds)])),
+    run: (c) => runTelegramWrite("delete scheduled message", () => cmdMsgScheduleDelete([c.args.chat, ...csv(c.args.msgIds)])),
   });
 
 const contacts = Cli.create("contacts", { description: "Manage Telegram contacts" })
@@ -3914,22 +3944,22 @@ const contacts = Cli.create("contacts", { description: "Manage Telegram contacts
       firstName: z.string().describe("First name"),
       lastName: z.string().optional().describe("Last name"),
     }),
-    run: (c) => runTelegram(() => cmdContactsAdd([c.args.phone, c.args.firstName, c.args.lastName ?? ""])),
+    run: (c) => runTelegramWrite("add contact", () => cmdContactsAdd([c.args.phone, c.args.firstName, c.args.lastName ?? ""])),
   })
   .command("delete", {
     description: "Delete a contact",
     args: z.object({ user: z.string().describe("Username, phone, or numeric user ID") }),
-    run: (c) => runTelegram(() => cmdContactsDelete([c.args.user])),
+    run: (c) => runTelegramWrite("delete contact", () => cmdContactsDelete([c.args.user])),
   })
   .command("block", {
     description: "Block a user",
     args: z.object({ user: z.string().describe("Username, phone, or numeric user ID") }),
-    run: (c) => runTelegram(() => cmdContactsBlock([c.args.user])),
+    run: (c) => runTelegramWrite("block contact", () => cmdContactsBlock([c.args.user])),
   })
   .command("unblock", {
     description: "Unblock a user",
     args: z.object({ user: z.string().describe("Username, phone, or numeric user ID") }),
-    run: (c) => runTelegram(() => cmdContactsUnblock([c.args.user])),
+    run: (c) => runTelegramWrite("unblock contact", () => cmdContactsUnblock([c.args.user])),
   });
 
 const group = Cli.create("group", { description: "Manage Telegram groups and channels" })
@@ -3939,7 +3969,7 @@ const group = Cli.create("group", { description: "Manage Telegram groups and cha
       title: z.string().describe("Group title"),
       users: z.string().describe("Comma-separated users to add"),
     }),
-    run: (c) => runTelegram(() => cmdGroupCreate([c.args.title, ...csv(c.args.users)], {})),
+    run: (c) => runTelegramWrite("create group", () => cmdGroupCreate([c.args.title, ...csv(c.args.users)], {})),
   })
   .command("info", {
     description: "Get group info",
@@ -3958,7 +3988,7 @@ const group = Cli.create("group", { description: "Manage Telegram groups and cha
       chat: z.string().describe("Username or numeric chat ID"),
       user: z.string().describe("Username, phone, or numeric user ID"),
     }),
-    run: (c) => runTelegram(() => cmdGroupAdd([c.args.chat, c.args.user])),
+    run: (c) => runTelegramWrite("add group member", () => cmdGroupAdd([c.args.chat, c.args.user])),
   })
   .command("kick", {
     description: "Remove a member",
@@ -3966,7 +3996,7 @@ const group = Cli.create("group", { description: "Manage Telegram groups and cha
       chat: z.string().describe("Username or numeric chat ID"),
       user: z.string().describe("Username, phone, or numeric user ID"),
     }),
-    run: (c) => runTelegram(() => cmdGroupKick([c.args.chat, c.args.user])),
+    run: (c) => runTelegramWrite("kick group member", () => cmdGroupKick([c.args.chat, c.args.user])),
   })
   .command("title", {
     description: "Set group title",
@@ -3974,7 +4004,7 @@ const group = Cli.create("group", { description: "Manage Telegram groups and cha
       chat: z.string().describe("Username or numeric chat ID"),
       title: z.string().describe("New title; quote it if it contains spaces"),
     }),
-    run: (c) => runTelegram(() => cmdGroupTitle([c.args.chat, c.args.title])),
+    run: (c) => runTelegramWrite("set group title", () => cmdGroupTitle([c.args.chat, c.args.title])),
   })
   .command("description", {
     description: "Set group description",
@@ -3982,12 +4012,12 @@ const group = Cli.create("group", { description: "Manage Telegram groups and cha
       chat: z.string().describe("Username or numeric chat ID"),
       text: z.string().default("").describe("Description text; quote it if it contains spaces"),
     }),
-    run: (c) => runTelegram(() => cmdGroupDescription([c.args.chat, c.args.text])),
+    run: (c) => runTelegramWrite("set group description", () => cmdGroupDescription([c.args.chat, c.args.text])),
   })
   .command("leave", {
     description: "Leave a group",
     args: z.object({ chat: z.string().describe("Username or numeric chat ID") }),
-    run: (c) => runTelegram(() => cmdGroupLeave([c.args.chat])),
+    run: (c) => runTelegramWrite("leave group", () => cmdGroupLeave([c.args.chat])),
   });
 
 const media = Cli.create("media", { description: "Send and download Telegram media" })
@@ -4002,7 +4032,7 @@ const media = Cli.create("media", { description: "Send and download Telegram med
       voice: z.boolean().default(false).describe("Send as voice note"),
       videoNote: z.boolean().default(false).describe("Send as video note"),
     }),
-    run: (c) => runTelegram(() => cmdMediaSend(
+    run: (c) => runTelegramWrite("send media", () => cmdMediaSend(
       [c.args.chat, c.args.filePath, c.args.caption ?? ""],
       commandFlags({ voice: c.options.voice, "video-note": c.options.videoNote }),
     )),
@@ -4021,7 +4051,7 @@ const profile = Cli.create("profile", { description: "Manage your Telegram profi
   .command("set-bio", {
     description: "Set profile bio",
     args: z.object({ text: z.string().default("").describe("Bio text; quote it if it contains spaces") }),
-    run: (c) => runTelegram(() => cmdProfileSetBio([c.args.text])),
+    run: (c) => runTelegramWrite("set profile bio", () => cmdProfileSetBio([c.args.text])),
   })
   .command("set-name", {
     description: "Set profile name",
@@ -4029,12 +4059,12 @@ const profile = Cli.create("profile", { description: "Manage your Telegram profi
       firstName: z.string().describe("First name"),
       lastName: z.string().optional().describe("Last name"),
     }),
-    run: (c) => runTelegram(() => cmdProfileSetName([c.args.firstName, c.args.lastName ?? ""])),
+    run: (c) => runTelegramWrite("set profile name", () => cmdProfileSetName([c.args.firstName, c.args.lastName ?? ""])),
   })
   .command("set-username", {
     description: "Set profile username",
     args: z.object({ username: z.string().default("").describe("Username, or empty to clear") }),
-    run: (c) => runTelegram(() => cmdProfileSetUsername([c.args.username])),
+    run: (c) => runTelegramWrite("set profile username", () => cmdProfileSetUsername([c.args.username])),
   });
 
 const draft = Cli.create("draft", { description: "Manage Telegram drafts" })
@@ -4044,22 +4074,23 @@ const draft = Cli.create("draft", { description: "Manage Telegram drafts" })
       chat: z.string().describe("Username, phone, or numeric chat ID"),
       text: z.string().default("").describe("Draft text; quote it if it contains spaces"),
     }),
-    run: (c) => runTelegram(() => cmdDraftSet([c.args.chat, c.args.text])),
+    run: (c) => runTelegramWrite("set draft", () => cmdDraftSet([c.args.chat, c.args.text])),
   })
   .command("clear", {
     description: "Clear a draft",
     args: z.object({ chat: z.string().describe("Username, phone, or numeric chat ID") }),
-    run: (c) => runTelegram(() => cmdDraftClear([c.args.chat])),
+    run: (c) => runTelegramWrite("clear draft", () => cmdDraftClear([c.args.chat])),
   });
 
 const cli = Cli.create("tellatio", {
-  description: "Full Telegram API for AI agents",
+  description: "Full Telegram API for AI agents. SECURITY: " + UNTRUSTED_ADVISORY,
   version: "0.1.0",
   format: "toon",
   sync: {
     suggestions: [
       "Use tellatio --llms to discover the Telegram command surface.",
       "Use tellatio msg read <chat> --limit 20 to inspect recent messages.",
+      UNTRUSTED_ADVISORY,
     ],
   },
 })
