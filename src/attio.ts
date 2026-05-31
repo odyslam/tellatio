@@ -13,7 +13,7 @@ import {
   type TelegramIdentityInput,
 } from "./identity";
 
-const BASE_URL = "https://api.attio.com/v2";
+const BASE_URL = `${process.env["ATTIO_API_BASE_URL"] || "https://api.attio.com"}/v2`;
 
 let apiKey: string;
 

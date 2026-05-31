@@ -1,0 +1,59 @@
+# Example iron.sh (iron-proxy) egress policy for the Tellatio worker.
+#
+# IMPORTANT: This is an illustrative policy. The exact field names/structure
+# may differ from your iron-proxy version — verify every field against
+# https://docs.iron.sh before deploying. The intent is documented in comments
+# so you can map it onto the real schema.
+#
+# Intent:
+#   - Default-deny all egress.
+#   - Allow HTTPS to api.attio.com and inject the Attio Bearer key (the worker
+#     never sees the raw key; iron adds the Authorization header).
+#   - Allowlist Telegram's MTProto data-center CIDRs. Telegram is TCP/MTProto,
+#     NOT HTTP, so it is egress-allowlisted but the SESSION IS NOT injected by
+#     iron — the worker loads the session from a mounted secret file instead.
+#   - Start in "warn" mode so violations are logged but not blocked; flip to
+#     "enforce" once the allowlist is verified against real traffic.
+
+version: 1
+
+# Global mode: warn (log-only) to start. Switch to "enforce" for default-deny.
+mode: warn
+
+# Port iron listens on for forward-proxied HTTP(S) egress.
+# Keep in sync with HTTPS_PROXY=http://iron:8080 in docker-compose.yml.
+listen:
+  port: 8080
+
+# Default-deny: anything not matched by an allow rule below is denied.
+defaultAction: deny
+
+egress:
+  allow:
+    # --- Attio HTTP API (Bearer key injected by iron) ---
+    - name: attio-api
+      host: api.attio.com
+      ports: [443]
+      protocol: https
+      # Inject the Attio API key as a Bearer token on outbound requests.
+      # Source the secret per your iron setup (env var, file, or secret store);
+      # check https://docs.iron.sh for the exact injection syntax.
+      injectHeaders:
+        Authorization: "Bearer ${ATTIO_API_KEY}"  # placeholder — wire to a real secret
+
+    # --- Telegram MTProto data centers (TCP allowlist only, NO injection) ---
+    # MTProto is not HTTP; iron cannot inject the session credential here.
+    # These CIDRs cover Telegram's published DC ranges.
+    - name: telegram-mtproto
+      protocol: tcp
+      ports: [443, 80, 5222]
+      cidrs:
+        - 149.154.160.0/20
+        - 91.108.4.0/22
+        - 91.108.8.0/22
+        - 91.108.12.0/22
+        - 91.108.16.0/22
+        - 91.108.56.0/22
+        - 149.154.164.0/22
+        - 149.154.168.0/22
+        - 149.154.172.0/22

@@ -15,6 +15,9 @@ out/
 .env.test.local
 .env.production.local
 
+# Local secret files mounted into the worker / iron-proxy (see docker-compose.yml)
+secrets/
+
 # IDE
 .vscode/
 .idea/
