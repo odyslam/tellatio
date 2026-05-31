@@ -34,7 +34,8 @@
     "src/db.ts",
     "src/strength.ts",
     "src/guard.ts",
-    "src/cli.ts"
+    "src/cli.ts",
+    "src/cli/**/*.ts"
   ],
   "exclude": ["node_modules", "dist"]
 }

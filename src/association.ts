@@ -27,12 +27,28 @@ export function normalizeAssociationName(value: string): string {
     .trim();
 }
 
-const COMPANY_ALIASES: Record<string, string> = {
-  titan: "Gattaca",
-};
+function configuredCompanyAliases(): Record<string, string> {
+  const raw = process.env["TELLATIO_COMPANY_ALIASES"];
+  if (!raw) return {};
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+
+    const aliases: Record<string, string> = {};
+    for (const [alias, canonical] of Object.entries(parsed)) {
+      if (typeof canonical === "string" && canonical.trim()) {
+        aliases[normalizeAssociationName(alias)] = canonical.trim();
+      }
+    }
+    return aliases;
+  } catch {
+    return {};
+  }
+}
 
 export function canonicalCompanyName(name: string): string {
-  return COMPANY_ALIASES[normalizeAssociationName(name)] || name;
+  return configuredCompanyAliases()[normalizeAssociationName(name)] || name;
 }
 
 export interface AssociationSuggestion {
@@ -50,7 +66,6 @@ export interface AssociationSuggestion {
 }
 
 const WORK_TERMS = [
-  "phylax",
   "assertion",
   "assertions",
   "liveness",
@@ -69,8 +84,6 @@ const WORK_TERMS = [
   "zoom",
   "one-pager",
   "roadmap",
-  "base",
-  "linea",
   "ethereum",
   "defi",
   "exploit",
@@ -108,14 +121,24 @@ function clampConfidence(score: number): number {
   return Math.max(0, Math.min(1, Number(score.toFixed(2))));
 }
 
-function inferPhylaxCounterparty(title: string): string | null {
+function ownCompanyNames(): string[] {
+  const raw = process.env["TELLATIO_OWN_COMPANY_NAMES"] || "";
+  return raw.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function isOwnCompanyName(value: string): boolean {
+  const normalized = normalizeAssociationName(value);
+  return ownCompanyNames().some((name) => normalizeAssociationName(name) === normalized);
+}
+
+function inferOwnCompanyCounterparty(title: string): string | null {
   const match = title.match(/^\s*(.+?)\s*<>\s*(.+?)\s*$/i);
   if (!match) return null;
 
   const left = match[1].trim();
   const right = match[2].trim();
-  if (/^phylax(?: systems)?$/i.test(left)) return right;
-  if (/^phylax(?: systems)?$/i.test(right)) return left;
+  if (isOwnCompanyName(left)) return right;
+  if (isOwnCompanyName(right)) return left;
   return null;
 }
 
@@ -130,7 +153,7 @@ export function suggestAssociation(input: {
   const text = `${input.title}\n${input.lastMessageText || ""}`;
   const matchedWorkTerms = includesAny(text, WORK_TERMS);
   const matchedIgnoreTerms = includesAny(input.title, IGNORE_TERMS);
-  const counterparty = inferPhylaxCounterparty(input.title);
+  const counterparty = inferOwnCompanyCounterparty(input.title);
 
   let score = 0;
   let targetObject: "people" | "companies" | null = null;
@@ -140,7 +163,7 @@ export function suggestAssociation(input: {
     score += 0.65;
     targetObject = "companies";
     targetName = counterparty;
-    reasons.push(`title matches Phylax <> ${counterparty}`);
+    reasons.push(`title names configured own company and ${counterparty}`);
   }
 
   if (input.type === "dm") {

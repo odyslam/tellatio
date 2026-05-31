@@ -19,7 +19,9 @@ Tellatio brings your Telegram conversations into [Attio](https://attio.com) — 
 | Telegram Last Interaction | When you last messaged this person |
 | Telegram Message Count | Total messages exchanged |
 
-**Matching**: The new default source of truth is the `telegram_associations` Attio custom object for chats and the `telegram_identities` object for Telegram user -> Attio Person mappings. Legacy folder sync can still be enabled with `TELLATIO_SYNC_SOURCE=folder`, but ambiguous people now go to identity review instead of being blindly created. The resolver also reads Telegram profile descriptions, so "BD at 0x" or "ecosystem @ symbiotic" can help associate both a person and a group chat with the right Attio record.
+**Matching**: The new default source of truth is the `telegram_associations` Attio custom object for chats and the `telegram_identities` object for Telegram user -> Attio Person mappings. Legacy folder sync can still be enabled with `TELLATIO_SYNC_SOURCE=folder`, but ambiguous people now go to identity review instead of being blindly created. The resolver also reads Telegram profile descriptions, so "BD at Acme" or "ecosystem @ example-protocol" can help associate both a person and a group chat with the right Attio record.
+
+**Company matching config**: Tellatio has no built-in customer, partner, or internal-company names. Set `TELLATIO_OWN_COMPANY_NAMES` when your own company name appears in Telegram titles like `Acme <> Example Protocol`, and set `TELLATIO_COMPANY_ALIASES` when informal names should map to canonical CRM company names.
 
 **Bans**: Tellatio uses a Telegram folder named `Banned` by default as the no-sync/no-read list. Chats in that folder are skipped by discovery, identity reconciliation, message reads/searches, and sync. Add or remove entries with `tellatio bans add <chat>` and `tellatio bans remove <chat>`; do not use the folder as a sync source.
 
@@ -120,10 +122,12 @@ For CRM hygiene, use Telegram folders as a review queue rather than as the write
 - `BD Active` for live protocol/customer conversations
 - `Partners` for ongoing ecosystem threads
 - `Investors` or `Fundraise` for capital conversations
-- `Internal` for Phylax/team chats
+- `Internal` for company/team chats
 - `Watch` or `Communities` for context that should not sync by default
 
 Only approved Attio associations with a concrete `crm_record_id` should reach the sync worker.
+
+The CLI implementation is split by responsibility: `src/cli.ts` is the thin executable entrypoint, `src/cli/registry.ts` defines the incur command tree, `src/cli/commands.ts` contains command implementations, and `src/cli/runtime.ts` owns shared runtime helpers for env loading, Telegram connection handling, output, state, bans, and write guarding.
 
 ### Using with AI agents (security)
 
@@ -214,9 +218,13 @@ TELLATIO_AUTO_CREATE_GROUP_PEOPLE=false
 TELLATIO_FOLDER_FALLBACK_ENABLED=false
 TELLATIO_CHAT_FETCH_TIMEOUT_SECONDS=30
 TELLATIO_BAN_FOLDER_NAME=Banned
+TELLATIO_OWN_COMPANY_NAMES=Acme,Acme Labs
+TELLATIO_COMPANY_ALIASES={"example protocol":"Example Protocol Labs"}
 SYNC_INTERVAL_MINUTES=15
 DATA_DIR=./data
 ```
+
+Leave `TELLATIO_OWN_COMPANY_NAMES` empty if you do not want title-based counterparty inference. `TELLATIO_COMPANY_ALIASES` is a JSON object whose keys are informal aliases after normalization and whose values are the canonical company names to use in Attio matching.
 
 ### Run locally
 
@@ -242,6 +250,8 @@ TELLATIO_FOLDER_FALLBACK_ENABLED=false
 TELLATIO_DISCOVERY_DIALOG_LIMIT=1000
 TELLATIO_CHAT_FETCH_TIMEOUT_SECONDS=30
 TELLATIO_BAN_FOLDER_NAME=Banned
+TELLATIO_OWN_COMPANY_NAMES=
+TELLATIO_COMPANY_ALIASES={}
 SYNC_INTERVAL_SECONDS=900
 DATA_DIR=/data
 ```
