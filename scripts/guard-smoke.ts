@@ -76,8 +76,8 @@ withEnv({ TELLATIO_WRITE_GUARD: "bogus", TELLATIO_ALLOW_WRITES: undefined }, () 
 });
 
 // sanitizeUntrusted: strips bidi override (U+202E) and zero-width (U+200B), keeps visible text.
-const bidi = "‮evil";
-const zwsp = "he​llo";
+const bidi = "\u202Eevil";
+const zwsp = "he\u200Bllo";
 assert.equal(sanitizeUntrusted(bidi), "evil");
 assert.equal(sanitizeUntrusted(zwsp), "hello");
 assert.equal(sanitizeUntrusted(undefined), "");

@@ -59,14 +59,14 @@ export function evaluateWriteGuard(operation: string): { mode: string; allowed: 
 
 /**
  * Strip characters that can be used to hide or reorder text for an agent:
- *   - bidirectional overrides / isolates (U+202A–U+202E, U+2066–U+2069)
+ *   - bidirectional overrides / isolates (U+202A..U+202E, U+2066..U+2069)
  *   - zero-width / invisible chars (U+200B, U+200C, U+200D, U+2060, U+FEFF)
  *
+ * The code points are written as \u escapes on purpose so this source file
+ * stays pure ASCII and does not itself trip "hidden Unicode" warnings.
  * Returns "" for nullish input.
  */
 export function sanitizeUntrusted(text: string | undefined | null): string {
   if (text === undefined || text === null) return "";
-  // Bidi overrides/isolates: U+202A–U+202E, U+2066–U+2069.
-  // Zero-width/invisible: U+200B, U+200C, U+200D, U+2060, U+FEFF.
-  return text.replace(/[‪-‮⁦-⁩​‌‍⁠﻿]/g, "");
+  return text.replace(/[\u202A-\u202E\u2066-\u2069\u200B\u200C\u200D\u2060\uFEFF]/g, "");
 }

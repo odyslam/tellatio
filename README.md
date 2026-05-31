@@ -133,9 +133,9 @@ Tellatio cannot control the consuming agent's prompt, so it ships two defenses:
 
 - **Untrusted-content hardening.** Returned message text, names, and titles are stripped of bidirectional-override and zero-width characters, records are marked `untrusted: true`, and read commands include an `_advisory` field restating that the content is attacker-controlled.
 - **Write-guard.** Destructive and outbound commands are gated by the `TELLATIO_WRITE_GUARD` environment variable:
-  - `off` — no gating.
-  - `warn` (default) — logs a warning to stderr and proceeds.
-  - `enforce` — blocks the command (non-zero exit, no Telegram action) unless writes are explicitly allowed.
+  - `off`: no gating.
+  - `warn` (default): logs a warning to stderr and proceeds.
+  - `enforce`: blocks the command (non-zero exit, no Telegram action) unless writes are explicitly allowed.
 
   In `enforce` mode, allow a write by setting `TELLATIO_ALLOW_WRITES=1` (also accepts `true`/`yes`/`on`) in the environment. This is intentionally an out-of-band signal: a prompt-injected agent can append a flag to a command it emits, but cannot set the worker's environment.
 
