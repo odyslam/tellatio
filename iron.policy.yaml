@@ -1,7 +1,7 @@
 # Example iron.sh (iron-proxy) egress policy for the Tellatio worker.
 #
 # IMPORTANT: This is an illustrative policy. The exact field names/structure
-# may differ from your iron-proxy version — verify every field against
+# may differ from your iron-proxy version - verify every field against
 # https://docs.iron.sh before deploying. The intent is documented in comments
 # so you can map it onto the real schema.
 #
@@ -11,7 +11,7 @@
 #     never sees the raw key; iron adds the Authorization header).
 #   - Allowlist Telegram's MTProto data-center CIDRs. Telegram is TCP/MTProto,
 #     NOT HTTP, so it is egress-allowlisted but the SESSION IS NOT injected by
-#     iron — the worker loads the session from a mounted secret file instead.
+#     iron - the worker loads the session from a mounted secret file instead.
 #   - Start in "warn" mode so violations are logged but not blocked; flip to
 #     "enforce" once the allowlist is verified against real traffic.
 
@@ -39,7 +39,7 @@ egress:
       # Source the secret per your iron setup (env var, file, or secret store);
       # check https://docs.iron.sh for the exact injection syntax.
       injectHeaders:
-        Authorization: "Bearer ${ATTIO_API_KEY}"  # placeholder — wire to a real secret
+        Authorization: "Bearer ${ATTIO_API_KEY}"  # placeholder - wire to a real secret
 
     # --- Telegram MTProto data centers (TCP allowlist only, NO injection) ---
     # MTProto is not HTTP; iron cannot inject the session credential here.

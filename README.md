@@ -259,15 +259,15 @@ filesystem and a writable `/data` volume.
 HTTP Bearer token, so iron *cannot* inject it. Instead it is loaded from a secret
 file (`TELEGRAM_SESSION_FILE`) and its egress is contained: `iron.policy.yaml`
 allowlists Telegram's data-center CIDRs but does not inject the session. Residual
-risk remains — a compromised worker can still use the loaded session to reach the
-allowlisted Telegram DCs — so treat the session as sensitive and rotate it if a
+risk remains: a compromised worker can still use the loaded session to reach the
+allowlisted Telegram DCs, so treat the session as sensitive and rotate it if a
 host is compromised.
 
 **Railway note.** On Railway, run iron as a separate egress service and point the
 worker at it via `HTTPS_PROXY`. Provide the Telegram session through a Railway
 secret file / mounted secret consumed via `TELEGRAM_SESSION_FILE` (and the Attio
 key via `ATTIO_API_KEY_FILE`, or let iron inject it). Continue to use a dedicated
-Railway `TELEGRAM_SESSION` — do not reuse the local/Codex session.
+Railway `TELEGRAM_SESSION`, and do not reuse the local/Codex session.
 
 ---
 

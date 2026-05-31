@@ -8,11 +8,11 @@
 # The worker's HTTP egress (Attio) is forced through iron via HTTPS_PROXY.
 # iron enforces default-deny egress, injects the Attio Bearer key, and
 # allowlists Telegram's MTProto DCs. The Telegram session is NOT injected by
-# iron (MTProto is not an HTTP credential) — it is loaded from a secret file.
+# iron (MTProto is not an HTTP credential) - it is loaded from a secret file.
 
 services:
   iron:
-    # Placeholder image — pin the real iron-proxy image and tag you trust.
+    # Placeholder image - pin the real iron-proxy image and tag you trust.
     # See https://docs.iron.sh for releases.
     image: ghcr.io/iron-sh/iron-proxy:latest
     restart: unless-stopped
@@ -60,7 +60,7 @@ services:
       - tellatio_data:/data
 
 secrets:
-  # File-based secrets. These ./secrets/*.txt paths are gitignored examples —
+  # File-based secrets. These ./secrets/*.txt paths are gitignored examples -
   # replace with your real secret files (or wire up your orchestrator's secrets).
   attio_api_key:
     file: ./secrets/attio_api_key.txt
