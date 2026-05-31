@@ -8,7 +8,7 @@
  */
 
 import assert from "node:assert/strict";
-import { evaluateWriteGuard, sanitizeUntrusted } from "../src/guard";
+import { evaluateWriteGuard, sanitizeUntrusted, sanitizeUntrustedValue } from "../src/guard";
 
 function withEnv(env: Record<string, string | undefined>, fn: () => void): void {
   const saved: Record<string, string | undefined> = {};
@@ -83,5 +83,9 @@ assert.equal(sanitizeUntrusted(zwsp), "hello");
 assert.equal(sanitizeUntrusted(undefined), "");
 assert.equal(sanitizeUntrusted(null), "");
 assert.equal(sanitizeUntrusted("plain text"), "plain text");
+assert.deepEqual(
+  sanitizeUntrustedValue({ title: "he\u200Bllo", nested: ["a\u202Eb"] }),
+  { title: "hello", nested: ["ab"] },
+);
 
 console.log("guard-smoke: PASS (write-guard matrix + sanitizeUntrusted)");

@@ -36,7 +36,7 @@ import {
   type BanList,
   type BannedTelegramUser,
 } from "./bans";
-import { evaluateWriteGuard, sanitizeUntrusted, UNTRUSTED_ADVISORY } from "./guard";
+import { evaluateWriteGuard, sanitizeUntrusted, sanitizeUntrustedValue, UNTRUSTED_ADVISORY } from "./guard";
 
 const execFileAsync = promisify(execFile);
 
@@ -79,7 +79,7 @@ function die(msg: string): never {
 }
 
 function out(data: unknown): void {
-  commandOutput = data;
+  commandOutput = sanitizeUntrustedValue(data);
 }
 
 function numFlag(flags: Record<string, string>, name: string, def: number): number {
@@ -102,6 +102,11 @@ async function runTelegram(operation: () => Promise<void>): Promise<unknown> {
 
 async function runTelegramWrite(operation: string, fn: () => Promise<void>): Promise<unknown> {
   assertWritesAllowed(operation);
+  return runTelegram(fn);
+}
+
+async function runTelegramMaybeWrite(operation: string, shouldGuard: boolean, fn: () => Promise<void>): Promise<unknown> {
+  if (shouldGuard) assertWritesAllowed(operation);
   return runTelegram(fn);
 }
 
@@ -3487,7 +3492,7 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
       color: z.number().optional().describe("Telegram folder color ID"),
       dryRun: z.boolean().default(false).describe("Preview without changing Telegram"),
     }),
-    run: (c) => runTelegram(() => cmdFoldersCreate([c.args.name], commandFlags(c.options))),
+    run: (c) => runTelegramMaybeWrite("create folder", !c.options.dryRun, () => cmdFoldersCreate([c.args.name], commandFlags(c.options))),
   })
   .command("rename", {
     description: "Rename a Telegram folder",
@@ -3496,13 +3501,13 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
       to: z.string().describe("New folder name"),
     }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
-    run: (c) => runTelegram(() => cmdFoldersRename([c.args.from, c.args.to, c.options.dryRun ? "dry-run" : ""])),
+    run: (c) => runTelegramMaybeWrite("rename folder", !c.options.dryRun, () => cmdFoldersRename([c.args.from, c.args.to, c.options.dryRun ? "dry-run" : ""])),
   })
   .command("delete", {
     description: "Delete a Telegram folder",
     args: z.object({ name: z.string().describe("Folder name") }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
-    run: (c) => runTelegram(() => cmdFoldersDelete([c.args.name, c.options.dryRun ? "dry-run" : ""])),
+    run: (c) => runTelegramMaybeWrite("delete folder", !c.options.dryRun, () => cmdFoldersDelete([c.args.name, c.options.dryRun ? "dry-run" : ""])),
   })
   .command("add", {
     description: "Add chats to a Telegram folder",
@@ -3511,7 +3516,7 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
       chat: z.string().describe("Chat identifier, or comma-separated chat identifiers"),
     }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
-    run: (c) => runTelegram(() => cmdFoldersAdd([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
+    run: (c) => runTelegramMaybeWrite("add chats to folder", !c.options.dryRun, () => cmdFoldersAdd([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
   })
   .command("remove", {
     description: "Remove chats from a Telegram folder",
@@ -3520,7 +3525,7 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
       chat: z.string().describe("Chat identifier, or comma-separated chat identifiers"),
     }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
-    run: (c) => runTelegram(() => cmdFoldersRemove([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
+    run: (c) => runTelegramMaybeWrite("remove chats from folder", !c.options.dryRun, () => cmdFoldersRemove([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
   })
   .command("pin", {
     description: "Pin chats inside a Telegram folder",
@@ -3529,7 +3534,7 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
       chat: z.string().describe("Chat identifier, or comma-separated chat identifiers"),
     }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
-    run: (c) => runTelegram(() => cmdFoldersPin([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
+    run: (c) => runTelegramMaybeWrite("pin chats in folder", !c.options.dryRun, () => cmdFoldersPin([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
   })
   .command("unpin", {
     description: "Unpin chats inside a Telegram folder",
@@ -3538,7 +3543,7 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
       chat: z.string().describe("Chat identifier, or comma-separated chat identifiers"),
     }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
-    run: (c) => runTelegram(() => cmdFoldersUnpin([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
+    run: (c) => runTelegramMaybeWrite("unpin chats in folder", !c.options.dryRun, () => cmdFoldersUnpin([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
   })
   .command("exclude-add", {
     description: "Explicitly exclude chats from a source-based Telegram folder",
@@ -3547,7 +3552,7 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
       chat: z.string().describe("Chat identifier, or comma-separated chat identifiers"),
     }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
-    run: (c) => runTelegram(() => cmdFoldersExcludeAdd([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
+    run: (c) => runTelegramMaybeWrite("exclude chats from folder", !c.options.dryRun, () => cmdFoldersExcludeAdd([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
   })
   .command("exclude-remove", {
     description: "Remove chats from a folder's explicit exclusions",
@@ -3556,7 +3561,7 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
       chat: z.string().describe("Chat identifier, or comma-separated chat identifiers"),
     }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
-    run: (c) => runTelegram(() => cmdFoldersExcludeRemove([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
+    run: (c) => runTelegramMaybeWrite("remove folder exclusions", !c.options.dryRun, () => cmdFoldersExcludeRemove([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
   })
   .command("sources", {
     description: "Edit built-in folder sources and exclusions",
@@ -3572,7 +3577,7 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
       excludeArchived: z.string().optional().describe("true/false"),
       dryRun: z.boolean().default(false).describe("Preview without changing Telegram"),
     }),
-    run: (c) => runTelegram(() => cmdFoldersSources([c.args.folder], commandFlags({
+    run: (c) => runTelegramMaybeWrite("edit folder sources", !c.options.dryRun, () => cmdFoldersSources([c.args.folder], commandFlags({
       contacts: c.options.contacts,
       "non-contacts": c.options.nonContacts,
       groups: c.options.groups,
@@ -3588,7 +3593,7 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
     description: "Move named folders to the front in the given order",
     args: z.object({ order: z.string().describe("Comma-separated folder names in desired leading order") }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
-    run: (c) => runTelegram(() => cmdFoldersReorder([c.args.order], commandFlags({ "dry-run": c.options.dryRun }))),
+    run: (c) => runTelegramMaybeWrite("reorder folders", !c.options.dryRun, () => cmdFoldersReorder([c.args.order], commandFlags({ "dry-run": c.options.dryRun }))),
   });
 
 const discover = Cli.create("discover", { description: "Find likely Telegram to Attio associations" })
@@ -3771,7 +3776,7 @@ const bans = Cli.create("bans", { description: "Manage the Telegram folder-backe
       reason: z.string().optional().describe("Short reason included in command output"),
       dryRun: z.boolean().default(false).describe("Preview without changing the Telegram ban folder"),
     }),
-    run: (c) => runTelegram(() => cmdBansAdd([c.args.user], commandFlags({
+    run: (c) => runTelegramMaybeWrite("add ban", !c.options.dryRun, () => cmdBansAdd([c.args.user], commandFlags({
       reason: c.options.reason,
       "dry-run": c.options.dryRun,
     }))),
@@ -3780,7 +3785,7 @@ const bans = Cli.create("bans", { description: "Manage the Telegram folder-backe
     description: "Remove a Telegram peer from the ban folder",
     args: z.object({ user: z.string().describe("Telegram username, @handle, t.me link, or numeric chat/user ID") }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing the Telegram ban folder") }),
-    run: (c) => runTelegram(() => cmdBansRemove([c.args.user], commandFlags({ "dry-run": c.options.dryRun }))),
+    run: (c) => runTelegramMaybeWrite("remove ban", !c.options.dryRun, () => cmdBansRemove([c.args.user], commandFlags({ "dry-run": c.options.dryRun }))),
   })
   .command("check", {
     description: "Check whether a Telegram peer is in the ban folder",

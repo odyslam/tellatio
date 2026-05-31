@@ -70,3 +70,27 @@ export function sanitizeUntrusted(text: string | undefined | null): string {
   if (text === undefined || text === null) return "";
   return text.replace(/[\u202A-\u202E\u2066-\u2069\u200B\u200C\u200D\u2060\uFEFF]/g, "");
 }
+
+export function sanitizeUntrustedValue<T>(value: T): T {
+  if (typeof value === "string") {
+    return sanitizeUntrusted(value) as T;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeUntrustedValue(item)) as T;
+  }
+
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  if (value instanceof Date || value instanceof Uint8Array) {
+    return value;
+  }
+
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    sanitized[key] = sanitizeUntrustedValue(entry);
+  }
+  return sanitized as T;
+}
