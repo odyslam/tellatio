@@ -1058,6 +1058,32 @@ async function cmdFoldersReorder(positional: string[], flags: Record<string, str
   out({ updated: ok, order: nextFolders.map(serializeFolder) });
 }
 
+async function cmdFoldersSyncAttio(flags: Record<string, string>): Promise<void> {
+  const folderName = flags["folder"] || process.env["TELEGRAM_FOLDER_NAME"] || "Attio";
+  const objectSlug = flags["object"] || process.env["TELLATIO_ASSOCIATION_OBJECT"] || "telegram_associations";
+  const includePeople = flags["include-people"] !== "false";
+  const isDryRun = dryRun(flags);
+
+  const approved = await attio.listApprovedTelegramAssociations(objectSlug);
+  const chatIds = approved
+    .filter((association) => includePeople || association.targetObject !== "people")
+    .map((association) => association.telegramChatId)
+    .filter(Boolean);
+
+  if (chatIds.length === 0) {
+    out({
+      folder: folderName,
+      object: objectSlug,
+      approvedCount: approved.length,
+      addCount: 0,
+      added: [],
+    });
+    return;
+  }
+
+  await cmdFoldersAdd([folderName, chatIds.join(","), isDryRun ? "dry-run" : ""]);
+}
+
 // ── discover ────────────────────────────────────────────────────
 
 async function cmdDiscoverAssociations(flags: Record<string, string>): Promise<void> {
@@ -2751,6 +2777,7 @@ export {
   cmdFoldersExcludeRemove,
   cmdFoldersSources,
   cmdFoldersReorder,
+  cmdFoldersSyncAttio,
   cmdDiscoverAssociations,
   cmdAssociationsUpsert,
   cmdAssociationsReconcile,

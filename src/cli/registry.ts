@@ -34,6 +34,7 @@ import {
   cmdFoldersExcludeRemove,
   cmdFoldersSources,
   cmdFoldersReorder,
+  cmdFoldersSyncAttio,
   cmdDiscoverAssociations,
   cmdAssociationsUpsert,
   cmdAssociationsReconcile,
@@ -252,6 +253,21 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
     args: z.object({ order: z.string().describe("Comma-separated folder names in desired leading order") }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
     run: (c) => runTelegramMaybeWrite("reorder folders", !c.options.dryRun, () => cmdFoldersReorder([c.args.order], commandFlags({ "dry-run": c.options.dryRun }))),
+  })
+  .command("sync-attio", {
+    description: "Add approved Telegram Association chats to the Attio review folder",
+    options: z.object({
+      folder: z.string().default("Attio").describe("Telegram folder to receive approved association chats"),
+      object: z.string().default("telegram_associations").describe("Attio association object slug"),
+      includePeople: z.boolean().default(true).describe("Include approved person/DM associations"),
+      dryRun: z.boolean().default(false).describe("Preview without changing Telegram"),
+    }),
+    run: (c) => runTelegramAndAttio(() => cmdFoldersSyncAttio(commandFlags({
+      folder: c.options.folder,
+      object: c.options.object,
+      "include-people": c.options.includePeople,
+      "dry-run": c.options.dryRun,
+    }))),
   });
 
 const discover = Cli.create("discover", { description: "Find likely Telegram to Attio associations" })

@@ -126,6 +126,7 @@ For CRM hygiene, use Telegram folders as a review queue rather than as the write
 - `Watch` or `Communities` for context that should not sync by default
 
 Only approved Attio associations with a concrete `crm_record_id` should reach the sync worker.
+Run `tellatio folders sync-attio --dry-run` to preview drift between approved associations and the Telegram `Attio` folder, then run it without `--dry-run` to add missing approved chats.
 
 The CLI implementation is split by responsibility: `src/cli.ts` is the thin executable entrypoint, `src/cli/registry.ts` defines the incur command tree, `src/cli/commands.ts` contains command implementations, and `src/cli/runtime.ts` owns shared runtime helpers for env loading, Telegram connection handling, output, state, bans, and write guarding.
 
@@ -336,6 +337,7 @@ folders exclude-add <folder> <chat|a,b>         Exclude chats from source-based 
 folders exclude-remove <folder> <chat|a,b>      Remove explicit folder exclusions
 folders sources <folder> --groups true          Edit built-in folder sources
 folders reorder <folder1,folder2,...>           Move folders to the front in order
+folders sync-attio [--folder Attio]             Add approved association chats to the Attio folder
 discover associations [--since X] [--limit N]   Dry-run likely Attio chat associations
 associations status                              Association counts and records
 associations upsert --chat-id ...              Create/update an Attio association (--dry-run supported)
