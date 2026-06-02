@@ -398,6 +398,43 @@ function filterBannedDialogs<T extends { entity?: unknown }>(dialogs: T[], banLi
 
 let client: TelegramClient;
 
+function telegramConnectTimeoutMs(): number {
+  const raw = process.env["TELLATIO_TELEGRAM_CONNECT_TIMEOUT_MS"];
+  if (!raw) return 10000;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 10000;
+}
+
+function telegramReconnectRetries(): number {
+  const raw = process.env["TELLATIO_TELEGRAM_RECONNECT_RETRIES"];
+  if (!raw) return 0;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+function telegramUseWSS(): boolean {
+  const raw = process.env["TELLATIO_TELEGRAM_USE_WSS"];
+  if (!raw) return true;
+  const normalized = raw.trim().toLowerCase();
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  return true;
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function connect(): Promise<void> {
   const apiId = parseInt(requireEnv("TELEGRAM_API_ID"), 10);
   const apiHash = requireEnv("TELEGRAM_API_HASH");
@@ -405,11 +442,26 @@ async function connect(): Promise<void> {
 
   client = new TelegramClient(session, apiId, apiHash, {
     connectionRetries: 5,
+    reconnectRetries: telegramReconnectRetries(),
     autoReconnect: false,
+    useWSS: telegramUseWSS(),
     baseLogger: new Logger(LogLevel.NONE),
   });
   client.setLogLevel(LogLevel.NONE);
-  await client.connect();
+  try {
+    await withTimeout(client.connect(), telegramConnectTimeoutMs(), "Telegram connect");
+  } catch (err) {
+    try {
+      await client.destroy();
+    } catch {}
+    if (err instanceof Error) {
+      throw new Error(
+        `Telegram connection failed: ${err.message}. ` +
+        "The MTProto session may be invalid/duplicated, or the network path is closing the connection.",
+      );
+    }
+    throw err;
+  }
 }
 
 async function disconnect(): Promise<void> {
