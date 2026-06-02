@@ -4,7 +4,7 @@ import { loadConfig } from "../config";
 import { sanitizeUntrusted, UNTRUSTED_ADVISORY } from "../guard";
 import { canonicalCompanyName, normalizeAssociationName, suggestAssociation, type AssociationSuggestion, type TelegramAssociation } from "../association";
 import * as attio from "../attio";
-import { identityDisplayName, identityUsername, type TelegramIdentityInput } from "../identity";
+import { identityDisplayName, identityUsername, type TelegramIdentity, type TelegramIdentityInput } from "../identity";
 import { describeBannedUser, matchBannedIdentifier, matchBannedTelegramUser, type BanList } from "../bans";
 import type { StateStore } from "../state";
 import {
@@ -78,6 +78,7 @@ interface CompanyProfileSignal {
   name: string;
   count: number;
   people: string[];
+  source?: string;
 }
 
 async function fetchTelegramBio(user: Api.User): Promise<string | undefined> {
@@ -173,6 +174,16 @@ function knownCompanyMatch(raw: string, knownCompanies: KnownCompany[]): KnownCo
 
 function knownCompaniesWithRecordIds(knownCompanies: KnownCompany[]): attio.AttioRecordSummary[] {
   return knownCompanies.filter((company): company is attio.AttioRecordSummary => Boolean(company.recordId));
+}
+
+function associationTitleCompanyHints(
+  chatId: string,
+  title: string,
+  type: TelegramAssociation["telegramChatType"],
+): string[] {
+  const suggestion = suggestAssociation({ chatId, title, type });
+  if (suggestion.suggestedTargetObject !== "companies" || !suggestion.suggestedTargetName) return [];
+  return [canonicalCompanyName(suggestion.suggestedTargetName)];
 }
 
 function loadOwnCompanyNames(): string[] {
@@ -298,6 +309,7 @@ async function collectCompanyProfileSignals(
           name: existing?.name || hint,
           count: (existing?.count || 0) + 1,
           people: uniqueStrings([...(existing?.people || []), person]),
+          source: "profile",
         });
       }
     }
@@ -375,9 +387,111 @@ function withCompanyProfileSignals(
     proposedStatus: confidence >= 0.85 ? "approved" : confidence >= 0.45 ? "suggested" : "ignored",
     reasons: [
       ...suggestion.reasons,
-      `participant profile descriptions mention ${top.name}: ${top.people.slice(0, 4).join(", ")}`,
+      `participant ${top.source || "company"} signals mention ${top.name}: ${top.people.slice(0, 4).join(", ")}`,
     ],
   };
+}
+
+async function groupIdentityUsers(
+  entity: Api.Chat | Api.Channel,
+  sinceTs: number,
+  participantLimit: number,
+): Promise<Api.User[]> {
+  let users = await recentGroupSenders(
+    entity,
+    sinceTs,
+    Math.max(100, participantLimit * 5),
+  );
+  if (users.length === 0) {
+    users = (await client.getParticipants(entity as never, {}))
+      .filter((user): user is Api.User => user instanceof Api.User);
+  }
+  return users.slice(0, participantLimit);
+}
+
+function companyHintsFromPerson(
+  identity: TelegramIdentity,
+  person: attio.PersonSummary,
+  knownCompanies: KnownCompany[],
+  excludedCompanyNames: string[],
+): KnownCompany[] {
+  const rawHints = uniqueStrings([
+    ...identity.companyHints,
+    ...person.emails.map((email) => email.split("@")[1] || ""),
+    ...person.emails.map((email) => (email.split("@")[1] || "").split(".")[0] || ""),
+  ]);
+
+  const matches: KnownCompany[] = [];
+  const seen = new Set<string>();
+  for (const hint of rawHints) {
+    const company = knownCompanyMatch(hint, knownCompanies);
+    if (!company || isExcludedCompany(company.name, excludedCompanyNames)) continue;
+    const key = normalizeAssociationName(company.name);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    matches.push(company);
+  }
+  return matches;
+}
+
+async function collectIdentityCompanySignals(
+  entity: unknown,
+  identityObjectSlug: string,
+  knownCompanies: KnownCompany[],
+  sinceTs: number,
+  participantLimit: number,
+  excludedCompanyNames: string[],
+  banList: BanList = loadCliBanList(),
+): Promise<CompanyProfileSignal[]> {
+  if (!knownCompanies.length) return [];
+  if (!(entity instanceof Api.Chat || entity instanceof Api.Channel)) return [];
+
+  const byCompany = new Map<string, CompanyProfileSignal>();
+  const users = await groupIdentityUsers(entity, sinceTs, participantLimit);
+
+  for (const user of users) {
+    if (!(user instanceof Api.User) || user.bot) continue;
+    if (matchBannedEntity(banList, user)) continue;
+
+    const identity = await attio.findTelegramIdentity(identityObjectSlug, user.id.toString());
+    if (identity?.status !== "approved" || !identity.targetRecordId) continue;
+
+    const person = await attio.getPersonSummary(identity.targetRecordId);
+    if (!person) continue;
+
+    for (const company of companyHintsFromPerson(identity, person, knownCompanies, excludedCompanyNames)) {
+      const key = normalizeAssociationName(company.name);
+      const existing = byCompany.get(key);
+      byCompany.set(key, {
+        recordId: existing?.recordId || company.recordId,
+        name: existing?.name || company.name,
+        count: (existing?.count || 0) + 1,
+        people: uniqueStrings([...(existing?.people || []), person.name]),
+        source: "approved identity",
+      });
+    }
+  }
+
+  return Array.from(byCompany.values())
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+}
+
+function mergeCompanySignals(signals: CompanyProfileSignal[]): CompanyProfileSignal[] {
+  const byCompany = new Map<string, CompanyProfileSignal>();
+  for (const signal of signals) {
+    const key = normalizeAssociationName(signal.name);
+    if (!key) continue;
+    const existing = byCompany.get(key);
+    byCompany.set(key, {
+      recordId: existing?.recordId || signal.recordId,
+      name: existing?.name || signal.name,
+      count: (existing?.count || 0) + signal.count,
+      people: uniqueStrings([...(existing?.people || []), ...signal.people]),
+      source: uniqueStrings([existing?.source, signal.source]).join("+") || undefined,
+    });
+  }
+  return Array.from(byCompany.values())
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
 }
 
 function telegramIdentityFromUser(
@@ -459,23 +573,34 @@ async function cmdMe(): Promise<void> {
 
 async function cmdChatsList(flags: Record<string, string>): Promise<void> {
   const limit = numFlag(flags, "limit", 50);
+  const sinceTs = flags["since"] ? parseTimeFilter(flags["since"]) : undefined;
+  const omitLastMessageText = flags["omit-last-message-text"] === "true" || flags["omitLastMessageText"] === "true";
   const banList = loadCliBanList();
   const dialogs = filterBannedDialogs(await client.getDialogs({ limit }), banList);
-  const results = dialogs.map((d) => ({
-    id: dialogCanonicalId(d) || "",
-    canonicalId: entityIdString(d.entity) || dialogCanonicalId(d) || "",
-    dialogId: d.id?.toString(),
-    name: sanitizeUntrusted(d.name || d.title),
-    isGroup: d.isGroup,
-    isChannel: d.isChannel,
-    isUser: d.isUser,
-    unreadCount: d.unreadCount,
-    lastMessage: d.message ? {
-      id: d.message.id,
-      date: d.message.date,
-      text: sanitizeUntrusted(d.message.text || d.message.message || ""),
-    } : null,
-  }));
+  const results = dialogs
+    .filter((d) => (sinceTs ? (d.message?.date ?? 0) >= sinceTs : true))
+    .map((d) => {
+      const lastMessage = d.message
+        ? {
+            id: d.message.id,
+            date: d.message.date,
+            dateISO: new Date(d.message.date * 1000).toISOString(),
+            ...(!omitLastMessageText ? { text: sanitizeUntrusted(d.message.text || d.message.message || "") } : {}),
+          }
+        : null;
+
+      return {
+        id: dialogCanonicalId(d) || "",
+        canonicalId: entityIdString(d.entity) || dialogCanonicalId(d) || "",
+        dialogId: d.id?.toString(),
+        name: sanitizeUntrusted(d.name || d.title),
+        isGroup: d.isGroup,
+        isChannel: d.isChannel,
+        isUser: d.isUser,
+        unreadCount: d.unreadCount,
+        lastMessage,
+      };
+    });
   out({ _advisory: UNTRUSTED_ADVISORY, untrusted: true, chats: results });
 }
 
@@ -555,10 +680,13 @@ async function cmdChatsFolder(positional: string[]): Promise<void> {
 
 async function cmdChatsUnread(flags: Record<string, string>): Promise<void> {
   const limit = numFlag(flags, "limit", 50);
+  const sinceTs = flags["since"] ? parseTimeFilter(flags["since"]) : undefined;
+  const omitLastMessageText = flags["omit-last-message-text"] === "true" || flags["omitLastMessageText"] === "true";
   const banList = loadCliBanList();
   const dialogs = filterBannedDialogs(await client.getDialogs({ limit }), banList);
   const unread = dialogs
     .filter((d) => d.unreadCount > 0)
+    .filter((d) => (sinceTs ? (d.message?.date ?? 0) >= sinceTs : true))
     .map((d) => ({
       id: dialogCanonicalId(d) || "",
       canonicalId: entityIdString(d.entity) || dialogCanonicalId(d) || "",
@@ -571,7 +699,7 @@ async function cmdChatsUnread(flags: Record<string, string>): Promise<void> {
         id: d.message.id,
         date: d.message.date,
         dateISO: new Date(d.message.date * 1000).toISOString(),
-        text: sanitizeUntrusted(d.message.text || d.message.message || ""),
+        ...(!omitLastMessageText ? { text: sanitizeUntrusted(d.message.text || d.message.message || "") } : {}),
       } : null,
     }));
   out(unread);
@@ -1194,10 +1322,13 @@ async function cmdAssociationsUpsert(flags: Record<string, string>): Promise<voi
 
 async function cmdAssociationsReconcile(flags: Record<string, string>): Promise<void> {
   const objectSlug = flags["object"] || process.env["TELLATIO_ASSOCIATION_OBJECT"] || "telegram_associations";
+  const identityObjectSlug = flags["identity-object"] || process.env["TELLATIO_IDENTITY_OBJECT"] || "telegram_identities";
   const limit = numFlag(flags, "limit", 100);
   const sinceTs = flags["since"] ? parseTimeFilter(flags["since"]) : parseTimeFilter("3d");
   const minConfidence = flags["min-confidence"] ? Number.parseFloat(flags["min-confidence"]) : 0.45;
+  const includeIdentityEvidence = flags["include-identity-evidence"] !== "false";
   const includeProfileDescriptions = flags["include-profile-descriptions"] !== "false";
+  const identityParticipantLimit = numFlag(flags, "identity-participant-limit", 30);
   const profileParticipantLimit = numFlag(flags, "profile-participant-limit", 30);
   const companyLimit = numFlag(flags, "company-limit", 500);
   const onlyChats = flags["only-chats"]
@@ -1219,7 +1350,7 @@ async function cmdAssociationsReconcile(flags: Record<string, string>): Promise<
   }
 
   const approvedAssociations = await attio.listApprovedTelegramAssociations(objectSlug);
-  const knownCompanies = includeProfileDescriptions
+  const knownCompanies = includeProfileDescriptions || includeIdentityEvidence
     ? await loadKnownCompanies(approvedAssociations, companyLimit)
     : [];
   const fetchBio = createBioFetcher(includeProfileDescriptions);
@@ -1238,6 +1369,17 @@ async function cmdAssociationsReconcile(flags: Record<string, string>): Promise<
 
   for (const originalSuggestion of scopedSuggestions) {
     const dialog = dialogByChatId.get(originalSuggestion.telegramChatId);
+    const identitySignals = includeIdentityEvidence && dialog?.entity
+      ? await collectIdentityCompanySignals(
+        dialog.entity,
+        identityObjectSlug,
+        knownCompanies,
+        sinceTs,
+        identityParticipantLimit,
+        excludedCompanyNames,
+        banList,
+      )
+      : [];
     const profileSignals = includeProfileDescriptions && dialog?.entity
       ? await collectCompanyProfileSignals(
         dialog.entity,
@@ -1248,7 +1390,8 @@ async function cmdAssociationsReconcile(flags: Record<string, string>): Promise<
         banList,
       )
       : [];
-    const suggestion = withCompanyProfileSignals(originalSuggestion, profileSignals);
+    const companySignals = mergeCompanySignals([...identitySignals, ...profileSignals]);
+    const suggestion = withCompanyProfileSignals(originalSuggestion, companySignals);
 
     if (!suggestion.suggestedTargetObject || !suggestion.suggestedTargetName || suggestion.confidence < minConfidence) {
       result.ignored.push({
@@ -1256,6 +1399,7 @@ async function cmdAssociationsReconcile(flags: Record<string, string>): Promise<
         confidence: suggestion.confidence,
         reason: "below confidence threshold or no inferred target",
         profileSignals,
+        identitySignals,
       });
       continue;
     }
@@ -1277,24 +1421,40 @@ async function cmdAssociationsReconcile(flags: Record<string, string>): Promise<
     let targetName = suggestion.suggestedTargetName;
     if (suggestion.suggestedTargetObject === "companies") {
       targetName = canonicalCompanyName(suggestion.suggestedTargetName);
-      const profileSignalForTarget = profileSignals.find((signal) =>
+      const topCompanySignal = companySignals[0];
+      const conflictingCompanySignal = topCompanySignal
+        && normalizeAssociationName(canonicalCompanyName(topCompanySignal.name)) !== normalizeAssociationName(targetName)
+        ? topCompanySignal
+        : undefined;
+      const companySignalForTarget = companySignals.find((signal) =>
         normalizeAssociationName(canonicalCompanyName(signal.name)) === normalizeAssociationName(targetName),
       );
 
-      if (profileSignalForTarget?.recordId) {
+      if (conflictingCompanySignal) {
+        resolutionReason = `participant ${conflictingCompanySignal.source || "company"} evidence points to ${conflictingCompanySignal.name}, while chat inference points to ${targetName}`;
+        result.needsReview.push({
+          chat: suggestion.telegramChatTitle,
+          suggestedTarget: targetName,
+          confidence: suggestion.confidence,
+          reason: resolutionReason,
+          profileSignals,
+          identitySignals,
+        });
+      } else if (companySignalForTarget?.recordId) {
         status = "approved";
-        targetRecordId = profileSignalForTarget.recordId;
-        resolutionReason = `participant profile company hint match: ${profileSignalForTarget.name}`;
+        targetRecordId = companySignalForTarget.recordId;
+        resolutionReason = `participant ${companySignalForTarget.source || "company"} signal match: ${companySignalForTarget.name}`;
         if (targetName !== suggestion.suggestedTargetName) {
           resolutionReason = `alias ${suggestion.suggestedTargetName} -> ${targetName}; ${resolutionReason}`;
         }
         result.approved.push({
           chat: suggestion.telegramChatTitle,
-          company: profileSignalForTarget.name,
-          recordId: profileSignalForTarget.recordId,
+          company: companySignalForTarget.name,
+          recordId: companySignalForTarget.recordId,
           confidence: suggestion.confidence,
           reason: resolutionReason,
           profileSignals,
+          identitySignals,
         });
       } else {
         const resolution = await attio.resolveCompanyByName(targetName, {
@@ -1314,6 +1474,7 @@ async function cmdAssociationsReconcile(flags: Record<string, string>): Promise<
             confidence: suggestion.confidence,
             reason: resolutionReason,
             profileSignals,
+            identitySignals,
           });
         } else {
           result.needsReview.push({
@@ -1322,6 +1483,7 @@ async function cmdAssociationsReconcile(flags: Record<string, string>): Promise<
             confidence: suggestion.confidence,
             reason: resolution.reason,
             profileSignals,
+            identitySignals,
             candidates: resolution.candidates.map((candidate) => ({
               name: candidate.name,
               recordId: candidate.recordId,
@@ -1338,6 +1500,7 @@ async function cmdAssociationsReconcile(flags: Record<string, string>): Promise<
         confidence: suggestion.confidence,
         reason: resolutionReason,
         profileSignals,
+        identitySignals,
       });
     }
 
@@ -1428,11 +1591,18 @@ async function collectIdentityInputs(flags: Record<string, string>): Promise<Tel
   const sinceTs = flags["since"] ? parseTimeFilter(flags["since"]) : parseTimeFilter("3d");
   const includeParticipants = flags["include-participants"] !== "false";
   const includeProfileDescriptions = flags["include-profile-descriptions"] !== "false";
+  const includeExplicitGroups = flags["include-explicit-groups"] === "true";
+  const useGroupTitleCompanyHints = flags["group-title-company-hints"] !== "false";
   const companyLimit = numFlag(flags, "company-limit", 500);
   const onlyChats = flags["only-chats"]
     ? new Set(flags["only-chats"].split(",").map((v) => v.trim()).filter(Boolean))
     : undefined;
   const banList = loadCliBanList();
+
+  if (includeExplicitGroups && (!onlyChats || onlyChats.size === 0)) {
+    die("--include-explicit-groups requires --only-chats so unassociated group participant scans stay explicitly scoped");
+  }
+
   const dialogs = filterBannedDialogs(await client.getDialogs({ limit }), banList);
   const me = await client.getMe() as Api.User;
   const excludedUserIds = new Set([me.id.toString(), "777000"]);
@@ -1473,6 +1643,7 @@ async function collectIdentityInputs(flags: Record<string, string>): Promise<Tel
 
   const approvedAssociations = await attio.listApprovedTelegramAssociations(objectSlug);
   const knownCompanies = await loadKnownCompanies(approvedAssociations, companyLimit);
+  const approvedAssociationIds = new Set(approvedAssociations.map((association) => association.telegramChatId));
 
   const dialogByChatId = new Map<string, (typeof dialogs)[number]>();
   for (const dialog of dialogs) {
@@ -1494,43 +1665,63 @@ async function collectIdentityInputs(flags: Record<string, string>): Promise<Tel
     }
   }
 
+  async function addGroupParticipantIdentities(
+    dialog: (typeof dialogs)[number] | undefined,
+    source: string,
+    baseCompanyHints: string[] = [],
+  ): Promise<void> {
+    if (!dialog?.entity || dialog.entity instanceof Api.User) return;
+    if (!(dialog.entity instanceof Api.Chat || dialog.entity instanceof Api.Channel)) return;
+    if (!dialog.message || dialog.message.date < sinceTs) return;
+
+    const lastObservedAt = new Date(dialog.message.date * 1000).toISOString();
+    const users = await groupIdentityUsers(dialog.entity, sinceTs, participantLimit);
+    for (const user of users) {
+      if (user instanceof Api.User) {
+        if (matchBannedEntity(banList, user)) continue;
+        const bio = await userBio(user);
+        addIdentity(telegramIdentityFromUser(
+          user,
+          source,
+          lastObservedAt,
+          bio,
+          uniqueStrings([
+            ...baseCompanyHints,
+            ...inferCompanyHintsFromText(bio, knownCompanies, [user.username || ""], excludedCompanyNames),
+          ]),
+        ));
+      }
+    }
+  }
+
   if (includeParticipants) {
     const scopedApprovedAssociations = onlyChats && onlyChats.size > 0
       ? approvedAssociations.filter((a) => onlyChats.has(a.telegramChatId))
       : approvedAssociations;
     for (const association of scopedApprovedAssociations) {
       const dialog = dialogByChatId.get(association.telegramChatId);
-      if (!dialog?.entity || dialog.entity instanceof Api.User) continue;
-      if (!dialog.message || dialog.message.date < sinceTs) continue;
-
-      const lastObservedAt = dialog.message
-        ? new Date(dialog.message.date * 1000).toISOString()
-        : new Date().toISOString();
-      const source = `Group: ${association.telegramChatTitle}`;
-      let users = await recentGroupSenders(
-        dialog.entity as Api.Chat | Api.Channel,
-        sinceTs,
-        Math.max(100, participantLimit * 5),
+      await addGroupParticipantIdentities(
+        dialog,
+        `Group: ${association.telegramChatTitle}`,
+        association.targetObject === "companies" ? [association.targetName || ""] : [],
       );
-      if (users.length === 0) {
-        users = (await client.getParticipants(dialog.entity as never, {}))
-          .filter((user): user is Api.User => user instanceof Api.User);
-      }
-      for (const user of users.slice(0, participantLimit)) {
-        if (user instanceof Api.User) {
-          if (matchBannedEntity(banList, user)) continue;
-          const bio = await userBio(user);
-          addIdentity(telegramIdentityFromUser(
-            user,
-            source,
-            lastObservedAt,
-            bio,
-            uniqueStrings([
-              association.targetObject === "companies" ? association.targetName : undefined,
-              ...inferCompanyHintsFromText(bio, knownCompanies, [user.username || ""], excludedCompanyNames),
-            ]),
-          ));
-        }
+    }
+
+    if (includeExplicitGroups && onlyChats) {
+      for (const chatId of onlyChats) {
+        if (approvedAssociationIds.has(chatId)) continue;
+        const dialog = dialogByChatId.get(chatId);
+        if (!dialog?.entity || dialog.entity instanceof Api.User) continue;
+        if (!(dialog.entity instanceof Api.Chat || dialog.entity instanceof Api.Channel)) continue;
+        const title = chatDisplayName(dialog.entity, dialog.name || dialog.title || "Unknown");
+        const type = associationChatType(dialog.entity);
+        await addGroupParticipantIdentities(
+          dialog,
+          `Group: ${title} (explicit scope)`,
+          useGroupTitleCompanyHints
+            ? associationTitleCompanyHints(chatId, title, type)
+            : [],
+        );
       }
     }
   }

@@ -35,31 +35,31 @@ Run the setup script to create the People attributes, the `Telegram Associations
 npx ts-node scripts/setup-attio.ts
 ```
 
-### 2. Discover likely associations
+### 2. Review recent Telegram scope
 
-Run the read-only discovery command:
-
-```bash
-tellatio discover associations --since 3d --json
-```
-
-Review the proposed `telegram_chat_id`, target type, target name, confidence, and rationale. To run the full resolver locally:
+Start with metadata-only review. This is the approval gate: it lists chat IDs, titles, unread counts, and last activity without printing message bodies or profile bios.
 
 ```bash
-tellatio associations reconcile --since 3d --limit 100 --json
+tellatio chats list --since 3d --limit 250 --omit-last-message-text --format json
 ```
 
-This checks group titles, recent work-language, and participant profile descriptions/bios. It approves exact company matches with concrete Attio record IDs and leaves ambiguous or missing matches as `needs_review`.
-
-### 3. Reconcile people identities
-
-Run the identity resolver:
+After approving exact chat IDs and a timeframe, reconcile Telegram users to Attio People first. For new group chats that do not yet have approved associations, pass `--include-explicit-groups` with `--only-chats`; this keeps participant scans scoped to the reviewed group IDs.
 
 ```bash
-tellatio identities reconcile --since 3d --limit 100 --json
+tellatio identities reconcile --since 3d --limit 100 --only-chats <chat_ids> --include-explicit-groups --participant-limit 30 --format json
 ```
 
-It scans recent DMs and participants in approved work group chats, including their Telegram profile descriptions/bios by default. Safe matches by Telegram user ID, phone, username, exact full name, or a company hint that disambiguates existing candidates are approved. Missing or ambiguous people are written as `needs_review` identity records, so the sync worker does not create duplicate People records.
+Safe matches by Telegram user ID, phone, username, exact full name, or disambiguating company context are approved. Missing or ambiguous people are written as `needs_review` identity records, so the sync worker does not create duplicate People records.
+
+### 3. Associate chats to CRM records
+
+After identities have been reviewed, reconcile group chats to Companies or DMs to People:
+
+```bash
+tellatio associations reconcile --since 3d --limit 100 --only-chats <chat_ids> --format json
+```
+
+This uses chat titles as metadata, but participant identity evidence now takes precedence: approved Telegram identity mappings and Person email domains can confirm the team behind a group. If participant evidence conflicts with a title-derived company, the association is left as `needs_review` instead of being auto-approved. Exact company matches still require concrete Attio `crm_record_id` values before approval.
 
 Useful review commands:
 

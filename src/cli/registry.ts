@@ -88,7 +88,11 @@ import {
 const chats = Cli.create("chats", { description: "Inspect Telegram chats and folders" })
   .command("list", {
     description: "List recent chats",
-    options: z.object({ limit: z.number().default(50).describe("Maximum chats to return") }),
+    options: z.object({
+      limit: z.number().default(50).describe("Maximum chats to return"),
+      since: z.string().optional().describe("Only include chats with last message since this filter (e.g. 3d, 12h, today)"),
+      omitLastMessageText: z.boolean().default(false).describe("Omit last message text for metadata-only review"),
+    }),
     run: (c) => runTelegram(() => cmdChatsList(commandFlags(c.options))),
   })
   .command("search", {
@@ -114,7 +118,11 @@ const chats = Cli.create("chats", { description: "Inspect Telegram chats and fol
   })
   .command("unread", {
     description: "List chats with unread messages",
-    options: z.object({ limit: z.number().default(50).describe("Maximum chats to scan") }),
+    options: z.object({
+      limit: z.number().default(50).describe("Maximum chats to scan"),
+      since: z.string().optional().describe("Only include chats with last message since this filter (e.g. 3d, 12h, today)"),
+      omitLastMessageText: z.boolean().default(false).describe("Omit last message text for metadata-only review"),
+    }),
     run: (c) => runTelegram(() => cmdChatsUnread(commandFlags(c.options))),
   })
   .command("activity", {
@@ -343,9 +351,12 @@ const associations = Cli.create("associations", { description: "Manage Attio Tel
     description: "Discover chats, resolve Attio targets, approve exact company matches, and mark the rest for review",
     options: z.object({
       object: z.string().default("telegram_associations").describe("Attio association object slug"),
+      identityObject: z.string().default("telegram_identities").describe("Attio identity object slug"),
       limit: z.number().default(100).describe("Maximum recent dialogs to inspect"),
       since: z.string().default("3d").describe("Time filter: today, yesterday, Nd, Nh, Nm, or YYYY-MM-DD"),
       minConfidence: z.number().default(0.45).describe("Minimum confidence required to upsert a candidate"),
+      includeIdentityEvidence: z.boolean().default(true).describe("Use approved Telegram identities and Person email domains as group company evidence"),
+      identityParticipantLimit: z.number().default(30).describe("Maximum recent senders or fallback participants to inspect for identity evidence"),
       includeProfileDescriptions: z.boolean().default(true).describe("Use Telegram profile descriptions/bios from group participants as company signals"),
       profileParticipantLimit: z.number().default(30).describe("Maximum group participants to inspect for profile company hints"),
       companyLimit: z.number().default(500).describe("Maximum Attio companies to load for profile hint matching"),
@@ -354,9 +365,12 @@ const associations = Cli.create("associations", { description: "Manage Attio Tel
     }),
     run: (c) => runTelegramAndAttio(() => cmdAssociationsReconcile(commandFlags({
       object: c.options.object,
+      "identity-object": c.options.identityObject,
       limit: c.options.limit,
       since: c.options.since,
       "min-confidence": c.options.minConfidence,
+      "include-identity-evidence": c.options.includeIdentityEvidence,
+      "identity-participant-limit": c.options.identityParticipantLimit,
       "include-profile-descriptions": c.options.includeProfileDescriptions,
       "profile-participant-limit": c.options.profileParticipantLimit,
       "company-limit": c.options.companyLimit,
@@ -385,7 +399,9 @@ const identities = Cli.create("identities", { description: "Resolve Telegram use
       limit: z.number().default(100).describe("Maximum recent dialogs to inspect"),
       since: z.string().default("3d").describe("Time filter: today, yesterday, Nd, Nh, Nm, or YYYY-MM-DD"),
       includeParticipants: z.boolean().default(true).describe("Include participants from approved group chats"),
+      includeExplicitGroups: z.boolean().default(false).describe("Also include participants from explicit --only-chats group IDs that do not yet have approved associations"),
       includeProfileDescriptions: z.boolean().default(true).describe("Fetch Telegram profile descriptions/bios and infer company hints"),
+      groupTitleCompanyHints: z.boolean().default(true).describe("Use explicit group titles as company hints when scanning unassociated groups"),
       participantLimit: z.number().default(50).describe("Maximum recent senders or fallback participants per approved group"),
       companyLimit: z.number().default(500).describe("Maximum Attio companies to load for profile hint matching"),
       onlyChats: z.string().optional().describe("Comma-separated Telegram canonical chat IDs to restrict scanning"),
@@ -397,7 +413,9 @@ const identities = Cli.create("identities", { description: "Resolve Telegram use
       limit: c.options.limit,
       since: c.options.since,
       "include-participants": c.options.includeParticipants,
+      "include-explicit-groups": c.options.includeExplicitGroups,
       "include-profile-descriptions": c.options.includeProfileDescriptions,
+      "group-title-company-hints": c.options.groupTitleCompanyHints,
       "participant-limit": c.options.participantLimit,
       "company-limit": c.options.companyLimit,
       "only-chats": c.options.onlyChats,

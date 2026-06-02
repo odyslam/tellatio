@@ -129,7 +129,7 @@ async function runLocal(operation: () => Promise<void>): Promise<unknown> {
 function commandFlags(values: Record<string, string | number | boolean | undefined>): Record<string, string> {
   const flags: Record<string, string> = {};
   for (const [key, value] of Object.entries(values)) {
-    if (value === undefined || value === false) continue;
+    if (value === undefined) continue;
     flags[key] = value === true ? "true" : String(value);
   }
   return flags;
