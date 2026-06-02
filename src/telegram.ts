@@ -42,12 +42,64 @@ export interface RecentChat {
 
 let client: TelegramClient | null = null;
 
+function telegramConnectTimeoutMs(): number {
+  const raw = process.env["TELLATIO_TELEGRAM_CONNECT_TIMEOUT_MS"];
+  if (!raw) return 10000;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 10000;
+}
+
+function telegramReconnectRetries(): number {
+  const raw = process.env["TELLATIO_TELEGRAM_RECONNECT_RETRIES"];
+  if (!raw) return 0;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+function telegramUseWSS(): boolean {
+  const raw = process.env["TELLATIO_TELEGRAM_USE_WSS"];
+  if (!raw) return true;
+  const normalized = raw.trim().toLowerCase();
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  return true;
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export async function connect(config: Config): Promise<TelegramClient> {
   const session = new StringSession(config.telegramSession);
   client = new TelegramClient(session, config.telegramApiId, config.telegramApiHash, {
     connectionRetries: 5,
+    reconnectRetries: telegramReconnectRetries(),
+    useWSS: telegramUseWSS(),
   });
-  await client.connect();
+  try {
+    await withTimeout(client.connect(), telegramConnectTimeoutMs(), "Telegram connect");
+  } catch (err) {
+    try {
+      await client.destroy();
+    } catch {}
+    if (err instanceof Error) {
+      throw new Error(
+        `Telegram connection failed: ${err.message}. ` +
+        "The MTProto session may be invalid/duplicated, or the network path is closing the connection.",
+      );
+    }
+    throw err;
+  }
   console.log("[telegram] Connected");
   return client;
 }
