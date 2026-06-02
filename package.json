@@ -8,6 +8,9 @@
   },
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "lint": "pnpm typecheck",
+    "test": "ts-node scripts/guard-smoke.ts && ts-node scripts/cli-logic-smoke.ts",
     "dev": "ts-node src/index.ts",
     "start": "node dist/index.js",
     "login:telegram": "node scripts/telegram-login.js",
