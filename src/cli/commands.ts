@@ -586,6 +586,9 @@ async function cmdChatsList(flags: Record<string, string>): Promise<void> {
             date: d.message.date,
             dateISO: new Date(d.message.date * 1000).toISOString(),
             ...(!omitLastMessageText ? { text: sanitizeUntrusted(d.message.text || d.message.message || "") } : {}),
+            out: d.message.out,
+            senderId: d.message.senderId?.toString(),
+            senderUsername: d.message.sender instanceof Api.User ? d.message.sender.username : undefined,
           }
         : null;
 
@@ -700,6 +703,9 @@ async function cmdChatsUnread(flags: Record<string, string>): Promise<void> {
         date: d.message.date,
         dateISO: new Date(d.message.date * 1000).toISOString(),
         ...(!omitLastMessageText ? { text: sanitizeUntrusted(d.message.text || d.message.message || "") } : {}),
+        out: d.message.out,
+        senderId: d.message.senderId?.toString(),
+        senderUsername: d.message.sender instanceof Api.User ? d.message.sender.username : undefined,
       } : null,
     }));
   out(unread);
@@ -734,15 +740,19 @@ async function cmdChatsActivity(positional: string[], flags: Record<string, stri
       const recent = filterBannedMessages(messages, banList).filter((m) => m.date >= sinceTs);
 
       if (recent.length > 0) {
+        const last = recent[0];
         activity.push({
           chat: chatName,
           chatId: (entity as any).id?.toString(),
           isGroup: !(entity instanceof Api.User),
           messageCount: recent.length,
           lastMessage: {
-            date: recent[0].date,
-            dateISO: new Date(recent[0].date * 1000).toISOString(),
-            text: (recent[0].text || recent[0].message || "").slice(0, 200),
+            date: last.date,
+            dateISO: new Date(last.date * 1000).toISOString(),
+            text: (last.text || last.message || "").slice(0, 200),
+            out: last.out,
+            senderId: last.senderId?.toString(),
+            senderUsername: last.sender instanceof Api.User ? last.sender.username : undefined,
           },
         });
       }
