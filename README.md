@@ -1,247 +1,331 @@
+<div align="center">
+
 # Tellatio
 
-Tellatio brings your Telegram conversations into [Attio](https://attio.com) — automatically. Think of it as the Telegram equivalent of Attio's built-in email sync.
+**Your Telegram CLI. Your Telegram → Attio sync.**
 
-## What it does
+Read and manage Telegram from your terminal, then sync approved conversations to the right CRM records.
 
-**Association-based sync**: Tellatio syncs Telegram chats that have an approved `Telegram Association` record in Attio. This lets an external reviewer or Codex automation decide which chats map to which CRM records, while the Railway worker stays deterministic.
+[Quick start](#quick-start) · [Telegram CLI](#telegram-cli) · [Attio sync](#attio-sync) · [Deployment](#deployment) · [Security](#security)
 
-- **DMs** can appear as Notes on a mapped Person record, with the conversation transcript organized by day
-- **Group chats** can appear as Notes on a mapped Company record, instead of being copied to every participant
-- **Legacy folder mode** can still auto-create Person records for unmatched DMs when explicitly enabled; group participants require a separate opt-in
-
-**CRM fields** updated on every Person record:
-
-| Field | What it shows |
-|---|---|
-| Telegram Connection | Relationship strength (Very Weak → Very Strong), same scale as Attio's email connection strength |
-| Telegram First Interaction | When you first messaged this person |
-| Telegram Last Interaction | When you last messaged this person |
-| Telegram Message Count | Total messages exchanged |
-
-**Matching**: The new default source of truth is the `telegram_associations` Attio custom object for chats and the `telegram_identities` object for Telegram user -> Attio Person mappings. Legacy folder sync can still be enabled with `TELLATIO_SYNC_SOURCE=folder`, but ambiguous people now go to identity review instead of being blindly created. The resolver also reads Telegram profile descriptions, so "BD at Acme" or "ecosystem @ example-protocol" can help associate both a person and a group chat with the right Attio record.
-
-**Company matching config**: Tellatio has no built-in customer, partner, or internal-company names. Set `TELLATIO_OWN_COMPANY_NAMES` when your own company name appears in Telegram titles like `Acme <> Example Protocol`, and set `TELLATIO_COMPANY_ALIASES` when informal names should map to canonical CRM company names.
-
-**Bans**: Tellatio uses a Telegram folder named `Banned` by default as the no-sync/no-read list. Chats in that folder are skipped by discovery, identity reconciliation, message reads/searches, and sync. Add or remove entries with `tellatio bans add <chat>` and `tellatio bans remove <chat>`; do not use the folder as a sync source.
-
-## How to use it
-
-### 1. Create the Attio schema
-
-Run the setup script to create the People attributes, the `Telegram Associations` custom object, and the `Telegram Identities` custom object:
-
-```bash
-npx ts-node scripts/setup-attio.ts
-```
-
-### 2. Review recent Telegram scope
-
-Start with metadata-only review. This is the approval gate: it lists chat IDs, titles, unread counts, and last activity without printing message bodies or profile bios.
-
-```bash
-tellatio chats list --since 3d --limit 250 --omit-last-message-text --format json
-```
-
-After approving exact chat IDs and a timeframe, reconcile Telegram users to Attio People first. For new group chats that do not yet have approved associations, pass `--include-explicit-groups` with `--only-chats`; this keeps participant scans scoped to the reviewed group IDs.
-
-```bash
-tellatio identities reconcile --since 3d --limit 100 --only-chats <chat_ids> --include-explicit-groups --participant-limit 30 --format json
-```
-
-Safe matches by Telegram user ID, phone, username, exact full name, or disambiguating company context are approved. Missing or ambiguous people are written as `needs_review` identity records, so the sync worker does not create duplicate People records.
-
-### 3. Associate chats to CRM records
-
-After identities have been reviewed, reconcile group chats to Companies or DMs to People:
-
-```bash
-tellatio associations reconcile --since 3d --limit 100 --only-chats <chat_ids> --format json
-```
-
-This uses chat titles as metadata, but participant identity evidence now takes precedence: approved Telegram identity mappings and Person email domains can confirm the team behind a group. If participant evidence conflicts with a title-derived company, the association is left as `needs_review` instead of being auto-approved. Exact company matches still require concrete Attio `crm_record_id` values before approval.
-
-Useful review commands:
-
-```bash
-tellatio associations status --json
-tellatio identities status --json
-tellatio identities candidates --name "Piotr" --json
-```
-
-Ban a Telegram account or chat before running discovery/sync:
-
-```bash
-tellatio bans add @jpsaly0wn --json
-tellatio bans check @jpsaly0wn --json
-```
-
-Manual approval:
-
-```bash
-tellatio identities upsert --telegram-user-id 518976833 --telegram-username pgrzesik --display-name "Piotr Grzesik" --target-record-id <attio_person_record_id> --status approved
-```
-
-### 4. Approve associations in Attio
-
-Create or update `Telegram Association` records with:
-
-- `Telegram Chat ID`
-- `Telegram Chat Title`
-- `Target Object` (`crm_object_slug`) such as `people` or `companies`
-- `Target Record ID` (`crm_record_id`)
-- `Status = approved`
-- `Sync Mode = transcript`
-
-### 5. Check your Attio records
-
-After the next sync cycle, open the mapped Person or Company record in Attio. You'll see:
-
-- A **Note** titled `Telegram · Contact Name` (for DMs) or `Telegram · [Group Name]` (for group chats) containing the full conversation transcript
-- The **Telegram Connection** field showing relationship strength
-- **First/Last Interaction** dates and **Message Count**
-
-### Legacy folder mode
-
-To keep the original folder-based behavior:
-
-```bash
-TELLATIO_SYNC_SOURCE=folder
-TELEGRAM_FOLDER_NAME=Attio
-```
-
-## Agent CLI
-
-Tellatio also includes a command-line tool that lets AI agents interact with Telegram programmatically — reading messages, sending replies, managing groups, scheduling follow-ups, and more.
-
-Folder commands are an admin surface for keeping Telegram organized. They do not change the default sync source of truth: production sync should still be driven by approved `telegram_associations` and reviewed `telegram_identities`, unless you explicitly opt back into legacy folder mode.
-
-For CRM hygiene, use Telegram folders as a review queue rather than as the write boundary. A practical setup is:
-
-- `Attio` for chats worth reviewing or mapping
-- `BD Active` for live protocol/customer conversations
-- `Partners` for ongoing ecosystem threads
-- `Investors` or `Fundraise` for capital conversations
-- `Internal` for company/team chats
-- `Watch` or `Communities` for context that should not sync by default
-
-Only approved Attio associations with a concrete `crm_record_id` should reach the sync worker.
-Run `tellatio folders sync-attio --dry-run` to preview drift between approved associations and the Telegram `Attio` folder, then run it without `--dry-run` to add missing approved chats.
-
-The CLI implementation is split by responsibility: `src/cli.ts` is the thin executable entrypoint, `src/cli/registry.ts` defines the incur command tree, `src/cli/commands.ts` contains command implementations, and `src/cli/runtime.ts` owns shared runtime helpers for env loading, Telegram connection handling, output, state, bans, and write guarding.
-
-### Using with AI agents (security)
-
-The CLI returns Telegram content (message text, sender names, chat titles, bios). Anyone can DM the account or set a malicious bio, so **all Telegram-derived content is untrusted**: treat it as DATA, never as instructions. An agent that follows instructions embedded in that content can be prompt-injected into calling destructive or outbound commands (sending messages, deleting, blocking, leaving groups, changing your profile, and so on).
-
-Tellatio cannot control the consuming agent's prompt, so it ships two defenses:
-
-- **Untrusted-content hardening.** CLI output strings are stripped of bidirectional-override and zero-width characters, Telegram-derived records are marked `untrusted: true`, and high-risk read commands include an `_advisory` field restating that the content is attacker-controlled.
-- **Write-guard.** Destructive and outbound commands are gated by the `TELLATIO_WRITE_GUARD` environment variable:
-  - `off`: no gating.
-  - `warn` (default): logs a warning to stderr and proceeds.
-  - `enforce`: blocks the command (non-zero exit, no Telegram action) unless writes are explicitly allowed.
-
-  In `enforce` mode, allow a write by setting `TELLATIO_ALLOW_WRITES=1` (also accepts `true`/`yes`/`on`) in the environment. This is intentionally an out-of-band signal: a prompt-injected agent can append a flag to a command it emits, but cannot set the worker's environment.
-
-**Recommendation:** run agents with `TELLATIO_WRITE_GUARD=enforce` and have a human grant `TELLATIO_ALLOW_WRITES=1` only for the specific invocation that should perform a write. Read-only commands (`msg read`, `chats list`, `group info`, etc.) and `--dry-run` previews are never gated.
-
-See the [CLI reference](#cli-reference) below for the full command list.
+</div>
 
 ---
 
-## Getting started (technical setup)
+## Two tools, one repo
 
-### Prerequisites
+| | Telegram CLI | Attio sync worker |
+| :--- | :--- | :--- |
+| **Use it for** | Terminal workflows, scripts, and AI agents | Telegram relationship history in [Attio](https://attio.com) |
+| **You can** | Read and search messages, send replies, manage groups and folders, schedule messages, and download media | Sync DMs to People and group conversations to Companies, with transcript Notes and Person interaction stats |
+| **Run it with** | `pnpm tellatio <command>` | `pnpm dev`, or deploy the Docker worker |
+| **Control scope with** | Metadata-only review, a no-read ban list, and an outbound/destructive write guard | Approved chat associations and reviewed identity mappings |
 
-- Node.js 18+
-- A Telegram account with API credentials ([get them here](https://my.telegram.org/apps))
-- An Attio workspace with an API key (Settings → Developers → API keys)
+Use the Telegram CLI on its own. Add Attio credentials when you want CRM commands or the sync worker.
 
-### Installation
+## Quick start
+
+### 1. Install
+
+You'll need **Node.js 22.19+**, **pnpm**, and **Bun** for the CLI launcher. Get Telegram API credentials from [my.telegram.org/apps](https://my.telegram.org/apps). For Attio sync, you'll also need an Attio workspace API key from **Settings → Developers → API keys**.
 
 ```bash
+git clone https://github.com/odyslam/tellatio.git
+cd tellatio
 pnpm install
+cp .env.example .env
 ```
 
-The package exposes a `tellatio` binary. In this checkout you can run it via:
+### 2. Connect Telegram
 
-```bash
-pnpm tellatio --help
-```
-
-For a PATH-level command, symlink `bin/tellatio` into a directory on your PATH.
-
-### Create Attio attributes
-
-Run the setup script to create the required custom attributes on People:
-
-```bash
-npx ts-node scripts/setup-attio.ts
-```
-
-### Get a Telegram session
+Add `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` to `.env`, then log in:
 
 ```bash
 pnpm login:telegram
 ```
 
-This walks you through logging into Telegram and produces a session string.
-
-For accounts where Telegram pushes passkey-based approval instead of a normal code, use QR login:
+Copy the session string into `TELEGRAM_SESSION` in `.env`. If Telegram asks for passkey approval, use QR login:
 
 ```bash
 pnpm login:telegram:qr
 ```
 
-Scan the printed QR code from an already logged-in Telegram app via `Settings -> Devices -> Link Desktop Device`. This lets Telegram handle passkey/biometric approval on the logged-in device, then Tellatio receives a normal `TELEGRAM_SESSION` string.
+Scan the QR code from an authenticated Telegram app under **Settings → Devices → Link Desktop Device**. Telegram handles passkey or biometric approval on that device.
 
-Use separate session strings for local automation and Railway. Do not reuse the same `TELEGRAM_SESSION` in both places, or Telegram can invalidate it with `AUTH_KEY_DUPLICATED`.
+> **Keep sessions separate.** Generate distinct session strings for local automation and Railway. Reusing one session in both places can cause Telegram to invalidate it with `AUTH_KEY_DUPLICATED`.
 
-### Configure
+### 3. Try the CLI
 
 ```bash
-cp .env.example .env
+pnpm tellatio --help
+pnpm tellatio chats list-meta --since 3d --limit 50 --format json
 ```
 
-Fill in your `.env`:
+For a `tellatio` command on your `PATH`, symlink `bin/tellatio` into a directory on your `PATH`. The examples below use that shorthand.
 
+To enable CRM sync, add `ATTIO_API_KEY` to `.env` and follow [Attio sync](#attio-sync) before starting the worker.
+
+## Telegram CLI
+
+Use Tellatio from your terminal or an agent workflow. The CLI uses [incur](https://github.com/wevm/incur), defaults to token-efficient TOON output, and supports JSON for scripts.
+
+### Everyday commands
+
+```bash
+# Review recent activity without message bodies or profile bios
+tellatio chats list-meta --since 3d --limit 100 --format json
+tellatio chats unread-meta --since 3d --limit 100 --format json
+
+# Read and search a conversation
+tellatio msg read <chat> --since 3d --limit 100 --format json
+tellatio msg search <chat> "meeting" --limit 20 --format json
+
+# Inspect a group or your folders
+tellatio group info <chat>
+tellatio folders list
 ```
-TELEGRAM_API_ID=...
-TELEGRAM_API_HASH=...
-TELEGRAM_SESSION=...       # from the login step
-ATTIO_API_KEY=...
-TELLATIO_SYNC_SOURCE=associations
-TELLATIO_ASSOCIATION_OBJECT=telegram_associations
-TELLATIO_IDENTITY_OBJECT=telegram_identities
-TELLATIO_AUTO_CREATE_PEOPLE=false
-TELLATIO_AUTO_CREATE_GROUP_PEOPLE=false
-TELLATIO_FOLDER_FALLBACK_ENABLED=false
-TELLATIO_CHAT_FETCH_TIMEOUT_SECONDS=30
-TELLATIO_BAN_FOLDER_NAME=Banned
-TELLATIO_OWN_COMPANY_NAMES=Acme,Acme Labs
-TELLATIO_COMPANY_ALIASES={"example protocol":"Example Protocol Labs"}
-SYNC_INTERVAL_MINUTES=15
-DATA_DIR=./data
+
+Reference chats by **username**, **phone number**, or **numeric ID**. Quote multi-word text arguments; use comma-separated values for commands that accept multiple message IDs or users.
+
+**Time filters:** `--since`, `--until`, and `--date` accept `today`, `yesterday`, `3d`, `2h`, `30m`, or `YYYY-MM-DD`, where the command supports that filter.
+
+**Output controls:** incur provides `--json`, `--format`, `--schema`, `--llms`, `--token-count`, `--token-limit`, and `--token-offset`. Use `tellatio <command> --help` for command-specific options.
+
+> **Using an AI agent?** Telegram text, names, titles, and bios are untrusted input. Set `TELLATIO_WRITE_GUARD=enforce` in the invoking environment before giving an agent access. See [Agent safety](#agent-safety) for the guard's scope and limits.
+
+### CLI reference
+
+<details>
+<summary><strong>Expand the command reference</strong></summary>
+
+```text
+me                                               Profile info
+doctor [--skip-telegram/attio/railway]           Health checks for Telegram, Attio, Railway, and state
+
+chats list [--limit N]                           Recent chats
+chats list-meta [--limit N]                      Recent chats without message text
+chats search <query> [--limit N]                 Search chats
+chats info <chat>                                Chat details
+chats resolve <chat>                             Canonical Telegram IDs and input peer
+chats folder <name>                              Chats in a folder
+chats unread [--limit N]                         Unread inbox
+chats unread-meta [--limit N]                    Unread inbox without message text
+chats activity <folder> [--since X]              Folder activity digest
+chats status <user>                              Online status
+folders list                                     All folders
+folders create <name> [--chats a,b] [--groups] Create a folder (--dry-run supported)
+folders rename <old-name> <new-name>             Rename a folder (--dry-run supported)
+folders delete <name>                            Delete a folder (--dry-run supported)
+folders add <folder> <chat|a,b>                  Add chats to a folder (--dry-run supported)
+folders remove <folder> <chat|a,b>               Remove chats from a folder (--dry-run supported)
+folders pin <folder> <chat|a,b>                  Pin chats inside a folder
+folders unpin <folder> <chat|a,b>                Unpin chats inside a folder
+folders exclude-add <folder> <chat|a,b>          Exclude chats from source-based folders
+folders exclude-remove <folder> <chat|a,b>       Remove explicit folder exclusions
+folders sources <folder> --groups true           Edit built-in folder sources
+folders reorder <folder1,folder2,...>            Move folders to the front in order
+folders sync-attio [--folder Attio]              Add approved association chats to the Attio folder
+discover associations [--since X] [--limit N]    Dry-run likely Attio chat associations
+associations status                              Association counts and records
+associations upsert --chat-id ...                Create/update an Attio association (--dry-run supported)
+associations reconcile [--since X]               Resolve and approve exact company matches (--dry-run supported)
+identities status                                Identity counts and records
+identities reconcile [--since X]                 Resolve Telegram users to Attio People (--dry-run supported)
+identities candidates [--name/--username X]      Search People candidates
+identities upsert --telegram-user-id ...         Create/update a person identity mapping (--dry-run supported)
+bans list                                        List folder-backed banned chats/users
+bans add <chat>                                  Add a chat/user to the no-sync ban folder
+bans remove <chat>                               Remove a chat/user from the ban folder
+bans check <chat>                                Check if a chat/user is banned
+
+msg read <chat> [--limit N] [--since X]          Read messages (--until, --date)
+msg send <chat> <text> [--reply-to N]            Send (--silent, --no-preview)
+msg edit <chat> <msg-id> <text>                  Edit
+msg delete <chat> <ids> [--revoke]               Delete comma-separated IDs
+msg forward <from> <to> <ids>                    Forward comma-separated IDs
+msg search <chat> <query> [--limit N]            Search in chat
+msg pin <chat> <msg-id> [--silent]               Pin
+msg unpin <chat> <msg-id>                        Unpin
+msg mark-read <chat>                             Mark as read
+msg schedule <chat> <text> --at <datetime>       Schedule a message
+msg schedule-list <chat>                         List scheduled
+msg schedule-delete <chat> <ids>                 Cancel comma-separated IDs
+
+contacts list                                    All contacts
+contacts add <phone> <first> [last]              Add contact
+contacts delete <user>                           Delete contact
+contacts block <user>                            Block
+contacts unblock <user>                          Unblock
+
+group create <title> <users>                     Create group with comma-separated users
+group info <chat>                                Group details
+group members <chat> [--limit N]                 Members
+group add <chat> <user>                          Add member
+group kick <chat> <user>                         Remove member
+group title <chat> <new-title>                   Set title
+group description <chat> <text>                  Set description
+group leave <chat>                               Leave
+
+media send <chat> <path> [caption]               Send file (--voice, --video-note)
+media download <chat> <msg-id> <path>            Download media
+
+profile set-bio <text>                           Set bio
+profile set-name <first> [last]                  Set name
+profile set-username <username>                  Set username
+
+draft set <chat> <text>                          Set draft
+draft clear <chat>                               Clear draft
 ```
 
-Leave `TELLATIO_OWN_COMPANY_NAMES` empty if you do not want title-based counterparty inference. `TELLATIO_COMPANY_ALIASES` is a JSON object whose keys are informal aliases after normalization and whose values are the canonical company names to use in Attio matching.
+</details>
 
-### Run locally
+## Attio sync
+
+Sync approved Telegram conversations into Attio, much like an email integration. Choose the destination record for each chat instead of copying group messages to each participant.
+
+| Telegram source | Attio destination | Synced content |
+| :--- | :--- | :--- |
+| **Direct message** | A mapped **Person** | A transcript Note, relationship strength, first/last interaction, and message count |
+| **Group chat** | A mapped **Company** | A transcript Note for the group |
+
+Transcript Notes use the title `Telegram · <chat title>` and organize messages by day. On mapped People, Tellatio updates these fields:
+
+| Field | Meaning |
+| :--- | :--- |
+| **Telegram Connection** | Relationship strength, from Very Weak to Very Strong |
+| **Telegram First Interaction** | First recorded interaction |
+| **Telegram Last Interaction** | Most recent recorded interaction |
+| **Telegram Message Count** | Recorded messages exchanged |
+
+### Review → map → sync
+
+The default sync source is the Attio `telegram_associations` custom object. Use `telegram_identities` to map Telegram users to Attio People. An external reviewer or agent can propose mappings; the worker syncs approved associations with concrete CRM record IDs.
+
+**1. Create the Attio schema**
+
+With `ATTIO_API_KEY` in `.env`, run:
+
+```bash
+pnpm exec ts-node scripts/setup-attio.ts
+```
+
+This creates the People attributes and the **Telegram Associations** and **Telegram Identities** custom objects.
+
+**2. Review recent chat metadata**
+
+```bash
+tellatio chats list-meta --since 3d --limit 250 --format json
+tellatio chats unread-meta --since 3d --limit 250 --format json
+```
+
+Review exact chat IDs and a timeframe before fetching message bodies, profile bios, or group participants.
+
+**3. Resolve identities, then associate chats**
+
+Replace `<chat_ids>` with the comma-separated IDs you approved:
+
+```bash
+tellatio identities reconcile --since 3d --limit 100 --only-chats <chat_ids> --include-explicit-groups --participant-limit 30 --format json
+tellatio associations reconcile --since 3d --limit 100 --only-chats <chat_ids> --format json
+```
+
+Use `--include-explicit-groups` with `--only-chats` to scope participant scans to reviewed groups that lack approved associations.
+
+Identity matching uses Telegram user IDs, phone numbers, usernames, exact full names, and company context. Missing or ambiguous matches go to `needs_review` instead of creating duplicate People. Approved identity mappings and Person email domains take precedence over title-based company guesses; conflicting evidence leaves an association in review. Exact company matches still need a concrete Attio record ID before approval.
+
+Reconciliation can write mappings to Attio. Use `--dry-run` to preview supported commands before applying changes.
+
+```bash
+tellatio identities status --json
+tellatio identities candidates --name "Alex" --json
+tellatio associations status --json
+```
+
+To approve a Person mapping by hand:
+
+```bash
+tellatio identities upsert --telegram-user-id <telegram_user_id> --telegram-username <username> --display-name "Alex Example" --target-record-id <attio_person_record_id> --status approved
+```
+
+**4. Approve the chat destination in Attio**
+
+Create or update the **Telegram Association** record:
+
+| Attribute | Value |
+| :--- | :--- |
+| Telegram Chat ID | The reviewed chat's ID |
+| Telegram Chat Title | The chat's title |
+| Target Object (`crm_object_slug`) | `people` or `companies` |
+| Target Record ID (`crm_record_id`) | The destination Attio record ID |
+| Status | `approved` |
+| Sync Mode | `transcript` |
+
+**5. Start the worker**
+
+Set `DATA_DIR=./data` in `.env` for local use, then run:
 
 ```bash
 pnpm dev
 ```
 
-### Deploy to Railway
+The worker runs a sync cycle on startup, then waits between cycles. Open the mapped Person or Company in Attio to check the transcript Note and, for People, the interaction fields.
 
-The repo includes a Dockerfile. Deploy to Railway and attach a volume at `/data` for persistent sync state.
+### Matching configuration
 
-Sync state is stored in a SQLite database at `<DATA_DIR>/sync-state.db` (written incrementally, in WAL mode, so a crash mid-cycle cannot corrupt it). On first start, any pre-existing `sync-state.json` in `DATA_DIR` is imported once into SQLite and renamed to `sync-state.json.imported-<timestamp>` as a backup. The import is automatic and idempotent; `tellatio doctor` reports the DB path, schema version, and migration status. Do not run an older JSON-based build against a `DATA_DIR` that has already been migrated.
+Tellatio has no built-in customer, partner, or internal-company names. Configure your own names and aliases in `.env`:
 
-Recommended Railway worker settings:
-
+```dotenv
+TELLATIO_OWN_COMPANY_NAMES=Acme,Acme Labs
+TELLATIO_COMPANY_ALIASES={"example protocol":"Example Protocol Labs"}
 ```
+
+Own-company names help infer the counterparty in titles such as `Acme <> Example Protocol` and exclude your own organization from bio-based matching. Alias keys are normalized informal names; values are canonical CRM company names. Leave these settings empty or `{}` if you do not need them.
+
+### Folders and the no-read ban list
+
+Use Telegram folders as review queues. For example, keep candidate chats in `Attio`, current conversations in `BD Active`, and broader context in `Watch`. Folder membership does **not** approve a chat for sync.
+
+To align the `Attio` folder with approved associations:
+
+```bash
+tellatio folders sync-attio --dry-run
+tellatio folders sync-attio
+```
+
+Tellatio uses a folder named **Banned** as its no-sync/no-read list. Chats in it are excluded from discovery, identity reconciliation, message reads/searches, and sync. Use the ban commands to manage it; do not use it as a sync source.
+
+```bash
+tellatio bans add <chat> --json
+tellatio bans check <chat> --json
+tellatio bans remove <chat> --json
+```
+
+<details>
+<summary><strong>Legacy folder-based sync</strong></summary>
+
+To opt into the original folder-based sync behavior, set:
+
+```dotenv
+TELLATIO_SYNC_SOURCE=folder
+TELEGRAM_FOLDER_NAME=Attio
+```
+
+Unmatched DMs can create People only if you enable `TELLATIO_AUTO_CREATE_PEOPLE=true`. Creating People from group participants also requires `TELLATIO_AUTO_CREATE_GROUP_PEOPLE=true`. Both default to `false`.
+
+</details>
+
+## Deployment
+
+### Worker configuration
+
+Copy `.env.example` for the full configuration. These settings keep the worker scoped to approved associations:
+
+```dotenv
+TELEGRAM_API_ID=...
+TELEGRAM_API_HASH=...
+TELEGRAM_SESSION=...
+ATTIO_API_KEY=...
+
 TELLATIO_SYNC_SOURCE=associations
 TELLATIO_ASSOCIATION_OBJECT=telegram_associations
 TELLATIO_IDENTITY_OBJECT=telegram_identities
@@ -251,148 +335,90 @@ TELLATIO_FOLDER_FALLBACK_ENABLED=false
 TELLATIO_DISCOVERY_DIALOG_LIMIT=1000
 TELLATIO_CHAT_FETCH_TIMEOUT_SECONDS=30
 TELLATIO_BAN_FOLDER_NAME=Banned
-TELLATIO_OWN_COMPANY_NAMES=
-TELLATIO_COMPANY_ALIASES={}
 SYNC_INTERVAL_SECONDS=900
 DATA_DIR=/data
 ```
 
-Use a dedicated Railway `TELEGRAM_SESSION`. Do not reuse the local/Codex session in Railway.
+`SYNC_INTERVAL_SECONDS` takes precedence over `SYNC_INTERVAL_MINUTES` (default: 15). Sync cycles run without overlap; per-chat timeouts prevent one stale or inaccessible association from blocking a cycle without a time limit.
 
-The worker runs sync cycles serially, so a slow Telegram cycle will not overlap with the next interval. Each chat fetch has a timeout, and the worker logs the chat being checked so stale or inaccessible approved associations can be identified without blocking the whole process indefinitely.
+### Railway and Docker
 
-### Secrets & deployment hardening
+Deploy the included `Dockerfile` to Railway and attach a persistent volume at `/data`. Use a **dedicated Telegram session** for the worker, separate from your local or agent session.
 
-Tellatio handles two secrets: `TELEGRAM_SESSION` (an MTProto session string used
-locally) and `ATTIO_API_KEY` (an HTTP Bearer key). The goal of this section is to
-shrink their blast radius.
-
-**File-based secret loading.** Every secret can be supplied via a `*_FILE` env var
-pointing at a file instead of a plaintext env var. `${NAME}_FILE` takes precedence
-over `${NAME}`: e.g. `ATTIO_API_KEY_FILE=/run/secrets/attio_api_key` is read
-(trimmed) instead of `ATTIO_API_KEY`. This applies to `TELEGRAM_SESSION`,
-`ATTIO_API_KEY`, `TELEGRAM_API_HASH`, and `TELEGRAM_API_ID`. This keeps secrets
-out of the process environment and shell history, and lets you mount them as
-container/orchestrator secret files.
-
-**Egress firewall (iron-proxy).** The repo ships an example `docker-compose.yml`
-and `iron.policy.yaml` for running the worker behind the [iron.sh](https://docs.iron.sh)
-egress firewall. iron enforces default-deny egress: the worker's HTTP egress is
-forced through it via `HTTPS_PROXY=http://iron:8080` (Node's global `fetch` honors
-this through an undici `ProxyAgent`). iron allowlists `api.attio.com` and injects
-the Attio Bearer key, so the worker never holds the raw Attio key for HTTP calls.
-The worker container also runs as the non-root `node` user with a read-only root
-filesystem and a writable `/data` volume.
-
-**Telegram MTProto caveat.** The Telegram session is an MTProto credential, not an
-HTTP Bearer token, so iron *cannot* inject it. Instead it is loaded from a secret
-file (`TELEGRAM_SESSION_FILE`) and its egress is contained: `iron.policy.yaml`
-allowlists Telegram's data-center CIDRs but does not inject the session. Residual
-risk remains: a compromised worker can still use the loaded session to reach the
-allowlisted Telegram DCs, so treat the session as sensitive and rotate it if a
-host is compromised.
-
-**Railway note.** On Railway, run iron as a separate egress service and point the
-worker at it via `HTTPS_PROXY`. Provide the Telegram session through a Railway
-secret file / mounted secret consumed via `TELEGRAM_SESSION_FILE` (and the Attio
-key via `ATTIO_API_KEY_FILE`, or let iron inject it). Continue to use a dedicated
-Railway `TELEGRAM_SESSION`, and do not reuse the local/Codex session.
-
----
-
-## CLI reference
-
-Full Telegram API for AI agents, built with [incur](https://github.com/wevm/incur). Output defaults to token-efficient TOON, and every command also gets incur's global `--json`, `--format`, `--schema`, `--llms`, `--token-count`, `--token-limit`, and `--token-offset` flags. Run with:
+For a Node-based production run outside Docker:
 
 ```bash
-tellatio <command>
+pnpm build
+pnpm start
 ```
 
-Chats can be referenced by **username** (`john_doe`), **phone** (`+1234567890`), or **numeric ID**.
-Quote multi-word text arguments. Commands that operate on multiple message IDs or users accept comma-separated values.
+### Persistent state
 
-### Commands
+Tellatio stores sync state in `<DATA_DIR>/sync-state.db` using SQLite WAL mode with incremental writes. On first start, it imports an existing `sync-state.json` and renames the source to `sync-state.json.imported-<timestamp>` as a backup.
 
-```
-me                                              Profile info
-doctor [--skip-telegram/attio/railway]          Health checks for Telegram, Attio, Railway, and state
+Use `tellatio doctor` to inspect the database path, schema version, and migration status. Do not run an older JSON-based build against a migrated data directory.
 
-chats list [--limit N]                          Recent chats
-chats search <query> [--limit N]                Search chats
-chats info <chat>                               Chat details
-chats resolve <chat>                            Canonical Telegram IDs and input peer
-chats folder <name>                             Chats in a folder
-chats unread [--limit N]                        Unread inbox
-chats activity <folder> [--since X]             Folder activity digest
-chats status <user>                             Online status
-folders list                                    All folders
-folders create <name> [--chats a,b] [--groups] Create a folder (--dry-run supported)
-folders rename <old-name> <new-name>            Rename a folder (--dry-run supported)
-folders delete <name>                           Delete a folder (--dry-run supported)
-folders add <folder> <chat|a,b>                 Add chats to a folder (--dry-run supported)
-folders remove <folder> <chat|a,b>              Remove chats from a folder (--dry-run supported)
-folders pin <folder> <chat|a,b>                 Pin chats inside a folder
-folders unpin <folder> <chat|a,b>               Unpin chats inside a folder
-folders exclude-add <folder> <chat|a,b>         Exclude chats from source-based folders
-folders exclude-remove <folder> <chat|a,b>      Remove explicit folder exclusions
-folders sources <folder> --groups true          Edit built-in folder sources
-folders reorder <folder1,folder2,...>           Move folders to the front in order
-folders sync-attio [--folder Attio]             Add approved association chats to the Attio folder
-discover associations [--since X] [--limit N]   Dry-run likely Attio chat associations
-associations status                              Association counts and records
-associations upsert --chat-id ...              Create/update an Attio association (--dry-run supported)
-associations reconcile [--since X]              Resolve and approve exact company matches (--dry-run supported)
-identities status                               Identity counts and records
-identities reconcile [--since X]                Resolve Telegram users to Attio People (--dry-run supported)
-identities candidates [--name/--username X]     Search People candidates
-identities upsert --telegram-user-id ...        Create/update a person identity mapping (--dry-run supported)
-bans list                                       List folder-backed banned chats/users
-bans add <chat>                                 Add a chat/user to the no-sync ban folder
-bans remove <chat>                              Remove a chat/user from the ban folder
-bans check <chat>                               Check if a chat/user is banned
+## Security
 
-msg read <chat> [--limit N] [--since X]         Read messages (--until, --date)
-msg send <chat> <text> [--reply-to N]           Send (--silent, --no-preview)
-msg edit <chat> <msg-id> <text>                 Edit
-msg delete <chat> <ids> [--revoke]              Delete comma-separated IDs
-msg forward <from> <to> <ids>                   Forward comma-separated IDs
-msg search <chat> <query> [--limit N]           Search in chat
-msg pin <chat> <msg-id> [--silent]              Pin
-msg unpin <chat> <msg-id>                       Unpin
-msg mark-read <chat>                            Mark as read
-msg schedule <chat> <text> --at <datetime>      Schedule a message
-msg schedule-list <chat>                        List scheduled
-msg schedule-delete <chat> <ids>                Cancel comma-separated IDs
+### Agent safety
 
-contacts list                                   All contacts
-contacts add <phone> <first> [last]             Add contact
-contacts delete <user>                          Delete contact
-contacts block <user>                           Block
-contacts unblock <user>                         Unblock
+Treat Telegram-derived messages, names, chat titles, and bios as **data, not instructions**. Anyone who can message the account or change a profile can supply attacker-controlled text.
 
-group create <title> <users>                    Create group with comma-separated users
-group info <chat>                               Group details
-group members <chat> [--limit N]                Members
-group add <chat> <user>                         Add member
-group kick <chat> <user>                        Remove member
-group title <chat> <new-title>                  Set title
-group description <chat> <text>                 Set description
-group leave <chat>                              Leave
+Tellatio strips bidirectional-override and zero-width characters from output strings, marks Telegram-derived records with `untrusted: true`, and adds an `_advisory` to high-risk read output. These measures help consumers identify untrusted content; they do not prevent prompt injection on their own.
 
-media send <chat> <path> [caption]              Send file (--voice, --video-note)
-media download <chat> <msg-id> <path>           Download media
+The CLI write guard covers gated outbound and destructive Telegram operations:
 
-profile set-bio <text>                          Set bio
-profile set-name <first> [last]                 Set name
-profile set-username <username>                 Set username
+| `TELLATIO_WRITE_GUARD` | Behavior |
+| :--- | :--- |
+| `off` | No write gating |
+| `warn` **(default)** | Warn on stderr and proceed |
+| `enforce` | Block gated operations unless `TELLATIO_ALLOW_WRITES` permits them |
 
-draft set <chat> <text>                         Set draft
-draft clear <chat>                              Clear draft
+Set `TELLATIO_WRITE_GUARD=enforce` in the invoking environment. Have a human grant `TELLATIO_ALLOW_WRITES=1` for a specific approved invocation. The values `true`, `yes`, and `on` also permit writes. Read-only commands and supported `--dry-run` previews do not require this permission.
+
+**The guard is not a sandbox.** An agent with shell or environment control may set the permission variable itself. Keep approval and credential controls outside the agent's control when you need a hard boundary. Attio reconciliation writes need their own review; the Telegram write guard does not replace CRM approval.
+
+### Secrets
+
+Protect `TELEGRAM_SESSION`, `ATTIO_API_KEY`, and the Telegram API credentials. The **sync worker** supports file-based secrets for `TELEGRAM_SESSION`, `ATTIO_API_KEY`, `TELEGRAM_API_HASH`, and `TELEGRAM_API_ID`:
+
+```dotenv
+TELEGRAM_SESSION_FILE=/run/secrets/telegram_session
+ATTIO_API_KEY_FILE=/run/secrets/attio_api_key
 ```
 
-### Time filters
+`<NAME>_FILE` takes precedence over `<NAME>`; the worker reads and trims the file. The CLI and Attio setup script use their environment variables. Do not commit credentials or session strings.
 
-`--since`, `--until`, and `--date` accept: `yesterday`, `today`, `3d` (days ago), `2h` (hours ago), `30m` (minutes ago), or `YYYY-MM-DD`.
+<details>
+<summary><strong>Optional egress hardening with iron-proxy</strong></summary>
+
+`docker-compose.yml` and `iron.policy.yaml` are **reference examples, not a turnkey deployment**. Pin a trusted image, supply real secret files, check the policy schema against your iron-proxy version, and verify enforcement before use. The example policy starts in `warn` mode.
+
+The example routes worker HTTP requests through `HTTPS_PROXY=http://iron:8080` using an undici `ProxyAgent`. Its intended policy allows Attio API access and supports Bearer-key injection at the proxy. The worker still requires an Attio credential value under its current configuration loader; this example does not prove a keyless-worker deployment.
+
+Telegram uses MTProto, so an HTTP proxy cannot inject the Telegram session. Load it from a secret file, and enforce any Telegram data-center egress restrictions at the network layer. A compromised worker can use its loaded session on permitted connections; rotate the session after a host compromise.
+
+The Compose worker runs as `node` with a read-only root filesystem and a writable `/data` volume. On Railway, adapt proxy and secret-file settings to your deployment and verify the network restrictions.
+
+</details>
+
+## Development
+
+```bash
+pnpm typecheck
+pnpm test
+pnpm build
+```
+
+| Path | Responsibility |
+| :--- | :--- |
+| `src/cli.ts` | CLI executable entrypoint |
+| `src/cli/registry.ts` | Command tree and options |
+| `src/cli/commands.ts` | Command implementations |
+| `src/cli/runtime.ts` | CLI environment, connections, output, state, bans, and write guarding |
+| `src/index.ts` | Sync worker entrypoint |
+| `src/sync.ts` | Telegram → Attio sync |
+| `scripts/setup-attio.ts` | Attio schema setup |
 
 ## License
 
