@@ -348,7 +348,7 @@ const associations = Cli.create("associations", { description: "Manage Attio Tel
     }))),
   })
   .command("reconcile", {
-    description: "Discover chats, resolve Attio targets, approve exact company matches, and mark the rest for review",
+    description: "Discover chats and propose Attio company destinations for explicit approval",
     options: z.object({
       object: z.string().default("telegram_associations").describe("Attio association object slug"),
       identityObject: z.string().default("telegram_identities").describe("Attio identity object slug"),
@@ -392,7 +392,7 @@ const identities = Cli.create("identities", { description: "Resolve Telegram use
     }))),
   })
   .command("reconcile", {
-    description: "Scan recent DMs and approved group participants, then create approved or needs-review identity mappings",
+    description: "Scan Telegram identities; approve only stable ID matches and propose profile matches for review",
     options: z.object({
       object: z.string().default("telegram_associations").describe("Attio chat association object slug"),
       identityObject: z.string().default("telegram_identities").describe("Attio identity object slug"),
