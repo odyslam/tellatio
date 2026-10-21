@@ -19,63 +19,11 @@ export function initAttio(key: string): void {
   apiKey = key;
 }
 
-function baseUrl(): string {
-  return `${(process.env["ATTIO_API_BASE_URL"] || "https://api.attio.com").replace(/\/+$/, "")}/v2`;
-}
+export { AttioApiError } from "./attio-http";
+import { attioRequest, attioSegment, MAX_ATTIO_BYTES } from "./attio-http";
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-export class AttioApiError extends Error {
-  constructor(
-    public readonly status: number,
-    public readonly path: string,
-    public readonly body: string,
-  ) {
-    super(`Attio API ${status}: ${path} — ${body}`);
-  }
-}
-
-async function attioFetch(path: string, options: RequestInit = {}): Promise<Response> {
-  const maxAttempts = 5;
-  let attempt = 0;
-  let lastError: unknown;
-
-  while (attempt < maxAttempts) {
-    attempt += 1;
-    try {
-      const res = await fetch(`${baseUrl()}${path}`, {
-        ...options,
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-          ...options.headers,
-        },
-      });
-
-      if (res.ok) return res;
-
-      const body = await res.text();
-      const shouldRetry = res.status === 429 || res.status === 502 || res.status === 503 || res.status === 504;
-      if (!shouldRetry || attempt >= maxAttempts) {
-        throw new AttioApiError(res.status, path, body);
-      }
-
-      const retryAfter = res.headers.get("retry-after");
-      const retryAfterMs = retryAfter ? Number.parseFloat(retryAfter) * 1000 : Number.NaN;
-      const backoffMs = Number.isFinite(retryAfterMs)
-        ? retryAfterMs
-        : Math.min(30_000, 750 * (2 ** (attempt - 1)));
-      await sleep(backoffMs);
-    } catch (err) {
-      lastError = err;
-      if (attempt >= maxAttempts) throw err;
-      await sleep(Math.min(30_000, 750 * (2 ** (attempt - 1))));
-    }
-  }
-
-  throw lastError instanceof Error ? lastError : new Error("Attio request failed");
+function attioFetch(path: string, options: RequestInit = {}): Promise<Response> {
+  return attioRequest(apiKey, path, options);
 }
 
 interface AttioRecord {
@@ -196,7 +144,7 @@ async function queryRecords(objectSlug: string, filter: Record<string, unknown> 
   const body: Record<string, unknown> = { limit };
   if (filter) body.filter = filter;
 
-  const res = await attioFetch(`/objects/${objectSlug}/records/query`, {
+  const res = await attioFetch(`/objects/${attioSegment(objectSlug)}/records/query`, {
     method: "POST",
     body: JSON.stringify(body),
   });
@@ -244,14 +192,14 @@ export async function upsertTelegramAssociation(
   const values = associationValues(association);
 
   if (existing?.recordId) {
-    await attioFetch(`/objects/${objectSlug}/records/${existing.recordId}`, {
+    await attioFetch(`/objects/${attioSegment(objectSlug)}/records/${attioSegment(existing.recordId)}`, {
       method: "PATCH",
       body: JSON.stringify({ data: { values } }),
     });
     return existing.recordId;
   }
 
-  const res = await attioFetch(`/objects/${objectSlug}/records`, {
+  const res = await attioFetch(`/objects/${attioSegment(objectSlug)}/records`, {
     method: "POST",
     body: JSON.stringify({
       data: { values },
@@ -473,7 +421,7 @@ function findCompanyHintCandidate(
 
 export async function getPersonSummary(recordId: string): Promise<PersonSummary | null> {
   try {
-    const res = await attioFetch(`/objects/people/records/${recordId}`, { method: "GET" });
+    const res = await attioFetch(`/objects/people/records/${attioSegment(recordId)}`, { method: "GET" });
     const data = (await res.json()) as { data: AttioRecord };
     return summarizePerson(data.data);
   } catch (err) {
@@ -602,14 +550,14 @@ export async function upsertTelegramIdentity(
   const values = identityValues(identity);
 
   if (existing?.recordId) {
-    await attioFetch(`/objects/${objectSlug}/records/${existing.recordId}`, {
+    await attioFetch(`/objects/${attioSegment(objectSlug)}/records/${attioSegment(existing.recordId)}`, {
       method: "PATCH",
       body: JSON.stringify({ data: { values } }),
     });
     return existing.recordId;
   }
 
-  const res = await attioFetch(`/objects/${objectSlug}/records`, {
+  const res = await attioFetch(`/objects/${attioSegment(objectSlug)}/records`, {
     method: "POST",
     body: JSON.stringify({
       data: { values },
@@ -759,7 +707,7 @@ export async function updatePersonTelegramIdentity(recordId: string, input: Tele
     }
   }
 
-  await attioFetch(`/objects/people/records/${recordId}`, {
+  await attioFetch(`/objects/people/records/${attioSegment(recordId)}`, {
     method: "PATCH",
     body: JSON.stringify({ data: { values } }),
   });
@@ -777,7 +725,7 @@ export async function updatePersonName(
     },
   };
 
-  await attioFetch(`/objects/people/records/${recordId}`, {
+  await attioFetch(`/objects/people/records/${attioSegment(recordId)}`, {
     method: "PATCH",
     body: JSON.stringify({ data: { values } }),
   });
@@ -1021,7 +969,7 @@ export interface TelegramStats {
  * Update all Telegram-related fields on a Person record in a single PATCH.
  */
 export async function updateTelegramStats(recordId: string, stats: TelegramStats): Promise<void> {
-  await attioFetch(`/objects/people/records/${recordId}`, {
+  await attioFetch(`/objects/people/records/${attioSegment(recordId)}`, {
     method: "PATCH",
     body: JSON.stringify({
       data: {
@@ -1050,7 +998,7 @@ async function findNoteByTitle(parentObject: string, recordId: string, title: st
 
   while (true) {
     const res = await attioFetch(
-      `/notes?parent_object=${parentObject}&parent_record_id=${recordId}&limit=${limit}&offset=${offset}`,
+      `/notes?parent_object=${encodeURIComponent(parentObject)}&parent_record_id=${encodeURIComponent(recordId)}&limit=${limit}&offset=${offset}`,
       { method: "GET" },
     );
 
@@ -1063,7 +1011,7 @@ async function findNoteByTitle(parentObject: string, recordId: string, title: st
 }
 
 async function deleteNote(noteId: string): Promise<void> {
-  await attioFetch(`/notes/${noteId}`, { method: "DELETE" });
+  await attioFetch(`/notes/${attioSegment(noteId)}`, { method: "DELETE" });
 }
 
 async function createNote(
@@ -1105,6 +1053,13 @@ export async function upsertNote(
   createdAt?: string,
   parentObject = "people",
 ): Promise<string> {
+  attioSegment(parentObject);
+  attioSegment(recordId);
+  // Fail before deleting the existing note if the replacement cannot be sent.
+  if (Buffer.byteLength(JSON.stringify({ data: {
+    parent_object: parentObject, parent_record_id: recordId, title,
+    format: "markdown", content, ...(createdAt ? { created_at: createdAt } : {}),
+  } })) > MAX_ATTIO_BYTES) throw new Error("Attio note exceeds size limit");
   const existingId = await findNoteByTitle(parentObject, recordId, title);
   if (existingId) {
     await deleteNote(existingId);

@@ -30,6 +30,9 @@ function request(id, method, params) {
   assert.deepEqual(result.result.tools.map(tool => tool.name).sort(), ['chats', 'info', 'me', 'read', 'search']);
   const blocked = await request(3, 'tools/call', { name: 'media_send', arguments: {} });
   assert.ok(blocked.error || blocked.result?.isError);
+  const tooLong = await request(4, 'tools/call', { name: 'read', arguments: { chat: 'x'.repeat(513) } });
+  assert.ok(tooLong.error || tooLong.result?.isError);
+  assert.match(JSON.stringify(tooLong), /512|too_big|maximum/i);
   console.log('readonly-mcp-smoke: PASS (exact read-only tool list despite write-enabling environment; write call rejected)');
 })().catch(err => { console.error(err); process.exitCode = 1; }).finally(() => {
   clearTimeout(timeout); child.stdin.end(); child.kill(); lines.close();

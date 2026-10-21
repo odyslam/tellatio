@@ -20,18 +20,18 @@ const cli = Cli.create("tellatio-readonly", {
   })
   .command("info", {
     description: "Read chat information",
-    args: z.object({ chat: z.string() }),
+    args: z.object({ chat: z.string().min(1).max(512) }),
     run: c => runTelegram(() => cmdChatsInfo([c.args.chat])),
   })
   .command("read", {
     description: "Read untrusted messages",
-    args: z.object({ chat: z.string() }),
+    args: z.object({ chat: z.string().min(1).max(512) }),
     options: z.object({ limit: z.number().int().min(1).max(200).default(50) }),
     run: c => runTelegram(() => cmdMsgRead([c.args.chat], commandFlags(c.options))),
   })
   .command("search", {
     description: "Search untrusted messages",
-    args: z.object({ chat: z.string(), query: z.string() }),
+    args: z.object({ chat: z.string().min(1).max(512), query: z.string().min(1).max(4096) }),
     options: z.object({ limit: z.number().int().min(1).max(200).default(50) }),
     run: c => runTelegram(() => cmdMsgSearch([c.args.chat, c.args.query], commandFlags(c.options))),
   });

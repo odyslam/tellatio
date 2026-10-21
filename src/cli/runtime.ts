@@ -1,3 +1,4 @@
+import { serialCommands } from "./serial";
 import * as fs from "node:fs";
 import { readSecret } from "../secret";
 import * as path from "node:path";
@@ -59,6 +60,7 @@ function requireEnv(name: string): string {
 
 // ─── Helpers ────────────────────────────────────────────────────
 
+const exclusively = serialCommands();
 let commandOutput: unknown;
 let activeBanList: BanList = compileBanList([]);
 
@@ -76,16 +78,18 @@ function numFlag(flags: Record<string, string>, name: string, def: number): numb
 }
 
 async function runTelegram(operation: () => Promise<void>): Promise<unknown> {
-  commandOutput = undefined;
-  loadEnv();
-  await connect();
-  try {
-    await refreshActiveBanList();
-    await operation();
-    return commandOutput ?? null;
-  } finally {
-    await disconnect();
-  }
+  return exclusively(async () => {
+    commandOutput = undefined;
+    loadEnv();
+    try {
+      await connect();
+      await refreshActiveBanList();
+      await operation();
+      return commandOutput ?? null;
+    } finally {
+      await disconnect();
+    }
+  });
 }
 
 async function runTelegramWrite(operation: string, fn: () => Promise<void>): Promise<unknown> {
@@ -99,32 +103,38 @@ async function runTelegramMaybeWrite(operation: string, shouldGuard: boolean, fn
 }
 
 async function runAttio(operation: () => Promise<void>): Promise<unknown> {
-  commandOutput = undefined;
-  loadEnv();
-  attio.initAttio(requireEnv("ATTIO_API_KEY"));
-  await operation();
-  return commandOutput ?? null;
+  return exclusively(async () => {
+    commandOutput = undefined;
+    loadEnv();
+    attio.initAttio(requireEnv("ATTIO_API_KEY"));
+    await operation();
+    return commandOutput ?? null;
+  });
 }
 
 async function runTelegramAndAttio(operation: () => Promise<void>): Promise<unknown> {
-  commandOutput = undefined;
-  loadEnv();
-  attio.initAttio(requireEnv("ATTIO_API_KEY"));
-  await connect();
-  try {
-    await refreshActiveBanList();
-    await operation();
-    return commandOutput ?? null;
-  } finally {
-    await disconnect();
-  }
+  return exclusively(async () => {
+    commandOutput = undefined;
+    loadEnv();
+    attio.initAttio(requireEnv("ATTIO_API_KEY"));
+    try {
+      await connect();
+      await refreshActiveBanList();
+      await operation();
+      return commandOutput ?? null;
+    } finally {
+      await disconnect();
+    }
+  });
 }
 
 async function runLocal(operation: () => Promise<void>): Promise<unknown> {
-  commandOutput = undefined;
-  loadEnv();
-  await operation();
-  return commandOutput ?? null;
+  return exclusively(async () => {
+    commandOutput = undefined;
+    loadEnv();
+    await operation();
+    return commandOutput ?? null;
+  });
 }
 
 function commandFlags(values: Record<string, string | number | boolean | undefined>): Record<string, string> {

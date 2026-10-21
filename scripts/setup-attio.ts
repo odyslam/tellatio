@@ -1,7 +1,10 @@
 /**
  * One-time setup: create the required custom attributes on People in Attio.
- * Run: npx ts-node scripts/setup-attio.ts
+ * Run: pnpm exec ts-node scripts/setup-attio.ts
  */
+
+import { attioRequest, attioSegment, AttioApiError } from "../src/attio-http";
+import { readSecret } from "../src/secret";
 
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -21,34 +24,24 @@ try {
   }
 } catch {}
 
-const API_KEY = process.env.ATTIO_API_KEY;
+const API_KEY = readSecret("ATTIO_API_KEY");
 if (!API_KEY) {
   console.error("ATTIO_API_KEY not set");
   process.exit(1);
 }
 
-const BASE = "https://api.attio.com/v2";
-
 async function api(method: string, path: string, body?: unknown): Promise<unknown> {
-  const res = await fetch(`${BASE}${path}`, {
-    method,
-    headers: {
-      Authorization: `Bearer ${API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-
-  const data = await res.json();
-  if (!res.ok) {
-    const err = data as { code?: string; message?: string };
-    // 409 = already exists, that's fine
-    if (res.status === 409) {
-      return { skipped: true, code: err.code };
-    }
-    throw new Error(`${res.status} ${err.code}: ${err.message}`);
+  try {
+    const res = await attioRequest(API_KEY!, path, {
+      method,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    return await res.json();
+  } catch (err) {
+    // 409 = already exists, that's fine. Do not log API response bodies.
+    if (err instanceof AttioApiError && err.status === 409) return { skipped: true };
+    throw err;
   }
-  return data;
 }
 
 interface AttrDef {
@@ -224,7 +217,7 @@ const IDENTITY_ATTRIBUTES: AttrDef[] = [
 ];
 
 async function ensureObject(objectSlug: string, singularNoun: string, pluralNoun: string): Promise<void> {
-  process.stdout.write(`${pluralNoun} object (${objectSlug})... `);
+  process.stdout.write(`${pluralNoun} object (${attioSegment(objectSlug)})... `);
   try {
     const result = await api("POST", "/objects", {
       data: {
@@ -241,9 +234,9 @@ async function ensureObject(objectSlug: string, singularNoun: string, pluralNoun
 }
 
 async function ensureAttribute(objectSlug: string, attr: AttrDef): Promise<void> {
-  process.stdout.write(`  ${objectSlug}.${attr.title} (${attr.api_slug})... `);
+  process.stdout.write(`  ${attioSegment(objectSlug)}.${attr.title} (${attioSegment(attr.api_slug)})... `);
   try {
-    const result = await api("POST", `/objects/${objectSlug}/attributes`, {
+    const result = await api("POST", `/objects/${attioSegment(objectSlug)}/attributes`, {
       data: {
         title: attr.title,
         description: `Managed by Tellatio sync service`,
@@ -267,7 +260,7 @@ async function ensureAttribute(objectSlug: string, attr: AttrDef): Promise<void>
         try {
           await api(
             "POST",
-            `/objects/${objectSlug}/attributes/${attr.api_slug}/options`,
+            `/objects/${attioSegment(objectSlug)}/attributes/${attioSegment(attr.api_slug)}/options`,
             { data: { title: option } },
           );
         } catch {

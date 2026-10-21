@@ -21,6 +21,14 @@ New state and media files use owner-only permissions. Protect the entire parent 
 
 The Docker runtime drops root through its entrypoint, contains production dependencies only, and excludes the host home directory. Use a read-only root filesystem and drop capabilities where supported. `docker-compose.yml` and `iron.policy.yaml` are illustrative configurations, not verified network enforcement. An HTTP proxy alone does not restrict MTProto or prevent session abuse.
 
+## Authenticated HTTP and concurrent tools
+
+Attio credentials are sent only to `https://api.attio.com/v2`; alternate `ATTIO_API_BASE_URL` origins now fail closed. Redirects are refused. Each attempt has a 30-second deadline including body consumption and an 8 MiB request/response limit. Response bodies are not copied into error logs. Dynamic path identifiers are validated; note query parameters are encoded.
+
+Only reads (GET and record-query POST) retry automatically, with bounded backoff. Mutations are not automatically replayed after an ambiguous transport failure. The next sync cycle may retry failed work; this is not exactly-once delivery. Oversized replacement notes fail before deleting the old note. Existing delete-then-create note replacement is still non-atomic on API failure.
+
+Persistent CLI/MCP commands serialize the complete shared-client/output lifecycle with at most 16 pending commands. Read-only chat/query arguments and result counts are bounded. This prevents concurrent command state mix-ups; it is not a sandbox against a malicious MCP client.
+
 ## Sync integrity
 
 Remote-write failures must not advance chat cursors. Retries deduplicate local transcript entries; failed fetches and association-list API errors produce failed run state, not a clean-success claim. The worker syncs completed UTC days, not today's messages. An idle successful cycle proves polling, not a fresh Attio write. Old transcripts are not retroactively rerendered on deployment.
