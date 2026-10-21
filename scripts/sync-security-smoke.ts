@@ -48,12 +48,13 @@ attio.upsertNote = async () => { writes++; if (fail) throw new Error("simulated 
   telegram.getMessages = async () => [{ id: 2, date: yesterday, senderIdStr: "123", senderName: "Sender", text: "pending review" }];
   const beforeBoundary = writes;
   telegram.getRecentChats = async () => [{ ...oneChat, chatInfo: { ...oneChat.chatInfo, type: "group", isGroup: true } }];
-  await assert.rejects(runSync(config), /chat type does not match/);
+  await runSync(config); // mismatch is quarantined, not process-fatal
+  store = openState(root); assert.equal(store.getChatState("123").lastMessageId, 1); store.close();
   telegram.getRecentChats = async () => [oneChat, { ...oneChat, chatInfo: { ...oneChat.chatInfo, type: "group", isGroup: true } }];
-  await assert.rejects(runSync(config), /peer namespaces/);
+  await runSync(config); // ambiguous legacy namespace also quarantined
   telegram.getRecentChats = async () => [oneChat];
   attio.listApprovedTelegramAssociations = async () => [{ ...association, telegramChatType: "unknown" }];
-  await assert.rejects(runSync(config), /chat type does not match/);
+  await runSync(config); // unknown legacy type is quarantined
   assert.equal(writes, beforeBoundary);
   store = openState(root); assert.equal(store.getChatState("123").lastMessageId, 1); store.close();
 
@@ -75,5 +76,5 @@ attio.upsertNote = async () => { writes++; if (fail) throw new Error("simulated 
   const linkDir = path.join(root, "link-state"); fs.mkdirSync(linkDir);
   fs.symlinkSync(path.join(root, "missing"), path.join(linkDir, "sync-state.db-wal"));
   assert.throws(() => openState(linkDir), /Unsafe/);
-  console.log("sync-security-smoke: PASS (write failure retains cursor, retry dedupes, failed reads are not success, private state, symlink refusal, peer-type boundaries, identity-review cursor retention)");
+  console.log("sync-security-smoke: PASS (write failure retains cursor, retry dedupes, failed reads are not success, private state, symlink refusal, peer-type quarantine, identity-review cursor retention)");
 })().catch(err => { console.error(err); process.exitCode = 1; }).finally(() => fs.rmSync(root, { recursive: true, force: true }));

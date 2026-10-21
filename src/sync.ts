@@ -220,8 +220,10 @@ async function getSyncChats(config: Config, banList: BanList): Promise<SyncChat[
     for (const association of associations) {
       const candidates = recentById.get(association.telegramChatId) || [];
       if (candidates.length > 1) {
-        // Legacy state uses bare IDs; do not mix different Telegram namespaces.
-        throw new Error("Ambiguous Telegram chat ID across peer namespaces; refusing sync");
+        // Legacy state uses bare IDs; quarantine this association but keep unrelated
+        // approved chats syncing. Its cursor remains untouched until reviewed.
+        console.error(`[sync] Quarantining association ${association.telegramChatId}: ambiguous Telegram peer namespace; review required`);
+        continue;
       }
       const recent = candidates[0];
       if (!recent) {
@@ -229,7 +231,8 @@ async function getSyncChats(config: Config, banList: BanList): Promise<SyncChat[
         continue;
       }
       if (association.telegramChatType === "unknown" || association.telegramChatType !== recent.chatInfo.type) {
-        throw new Error("Approved Telegram association chat type does not match live peer; review required");
+        console.error(`[sync] Quarantining association ${association.telegramChatId}: stored type ${association.telegramChatType} does not match live type ${recent.chatInfo.type}; review required`);
+        continue;
       }
       const banned = matchBannedChat(recent.chatInfo, banList);
       if (banned) {
