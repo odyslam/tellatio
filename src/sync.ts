@@ -210,14 +210,26 @@ async function getSyncChats(config: Config, banList: BanList): Promise<SyncChat[
     }
 
     const recentChats = await telegram.getRecentChats(config.discoveryDialogLimit);
-    const recentById = new Map(recentChats.map((chat) => [chat.chatInfo.idStr, chat]));
+    const recentById = new Map<string, typeof recentChats>();
+    for (const chat of recentChats) {
+      const sameId = recentById.get(chat.chatInfo.idStr) || [];
+      sameId.push(chat); recentById.set(chat.chatInfo.idStr, sameId);
+    }
     const selected: SyncChat[] = [];
 
     for (const association of associations) {
-      const recent = recentById.get(association.telegramChatId);
+      const candidates = recentById.get(association.telegramChatId) || [];
+      if (candidates.length > 1) {
+        // Legacy state uses bare IDs; do not mix different Telegram namespaces.
+        throw new Error("Ambiguous Telegram chat ID across peer namespaces; refusing sync");
+      }
+      const recent = candidates[0];
       if (!recent) {
         console.warn(`[sync] Approved chat not found in recent dialogs: ${association.telegramChatTitle} (${association.telegramChatId})`);
         continue;
+      }
+      if (association.telegramChatType === "unknown" || association.telegramChatType !== recent.chatInfo.type) {
+        throw new Error("Approved Telegram association chat type does not match live peer; review required");
       }
       const banned = matchBannedChat(recent.chatInfo, banList);
       if (banned) {
@@ -358,8 +370,7 @@ async function queueDMWork(
   });
 
   if (!person) {
-    console.warn(`[sync] Skipping DM "${chat.chatInfo.title}" until Telegram identity is reviewed`);
-    return;
+    throw new Error("DM Telegram identity requires review; cursor retained");
   }
 
   const recordId = person.recordId;
@@ -434,8 +445,7 @@ async function queueGroupWork(
     });
 
     if (!person) {
-      console.warn(`[sync] Skipping participant "${[p.firstName, p.lastName].filter(Boolean).join(" ") || p.username || p.userIdStr}" until Telegram identity is reviewed`);
-      continue;
+      throw new Error("Group participant Telegram identity requires review; cursor retained");
     }
 
     const recordId = person.recordId;

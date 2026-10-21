@@ -390,35 +390,6 @@ function uniqueStrings(values: Array<string | undefined>): string[] {
   return result;
 }
 
-function candidateMatchesCompanyHint(candidate: PersonSummary, hint: string): boolean {
-  const normalizedHint = normalizeAssociationName(hint);
-  if (!normalizedHint) return false;
-
-  if (normalizeIdentityName(candidate.name).includes(normalizedHint)) return true;
-
-  return candidate.emails.some((email) => {
-    const domain = email.split("@")[1] || "";
-    const domainRoot = domain.split(".")[0] || "";
-    return normalizeAssociationName(domain).includes(normalizedHint)
-      || normalizeAssociationName(domainRoot) === normalizedHint;
-  });
-}
-
-function findCompanyHintCandidate(
-  candidates: PersonSummary[],
-  companyHints: string[] | undefined,
-): { candidate: PersonSummary; hint: string } | null {
-  const unique = uniquePeople(candidates);
-  const hints = uniqueStrings(companyHints || []);
-
-  for (const hint of hints) {
-    const matches = unique.filter((candidate) => candidateMatchesCompanyHint(candidate, hint));
-    if (matches.length === 1) return { candidate: matches[0], hint };
-  }
-
-  return null;
-}
-
 export async function getPersonSummary(recordId: string): Promise<PersonSummary | null> {
   try {
     const res = await attioFetch(`/objects/people/records/${attioSegment(recordId)}`, { method: "GET" });
@@ -528,10 +499,15 @@ export async function findTelegramIdentity(
 ): Promise<TelegramIdentity | null> {
   const records = await queryRecords(objectSlug, {
     telegram_user_id: { $eq: telegramUserId },
-  }, 1);
-
+  }, 2);
+  if (records.length > 1) throw new Error("Duplicate Telegram identity mappings; review required");
   if (records.length === 0) return null;
-  return identityFromRecord(records[0], false);
+  const identity = identityFromRecord(records[0], false);
+  if (!identity || !["approved", "suggested", "ignored", "needs_review"].includes(identity.status)) {
+    throw new Error("Malformed Telegram identity mapping; review required");
+  }
+  if (identity.telegramUserId !== telegramUserId) throw new Error("Telegram identity ID mismatch");
+  return identity;
 }
 
 export async function listTelegramIdentities(objectSlug: string, limit = 500): Promise<TelegramIdentity[]> {
@@ -569,7 +545,8 @@ export async function upsertTelegramIdentity(
 }
 
 export interface PersonResolution {
-  status: "resolved" | "ambiguous" | "missing";
+  status: "resolved" | "ambiguous" | "missing" | "blocked";
+  preservedIdentity?: TelegramIdentity;
   record?: PersonSummary;
   candidates: PersonSummary[];
   confidence: number;
@@ -580,109 +557,50 @@ export async function resolvePersonIdentity(
   input: TelegramIdentityInput,
   identityObjectSlug = "telegram_identities",
 ): Promise<PersonResolution> {
+  if (!/^[1-9][0-9]{0,19}$/.test(input.telegramUserId)) {
+    throw new Error("A positive stable Telegram user ID is required");
+  }
   const existingIdentity = await findTelegramIdentity(identityObjectSlug, input.telegramUserId);
-  if (existingIdentity?.status === "approved" && existingIdentity.targetRecordId) {
-    const record = await getPersonSummary(existingIdentity.targetRecordId);
+  if (existingIdentity?.status === "ignored") {
+    return { status: "blocked", candidates: [], confidence: 0,
+      preservedIdentity: existingIdentity, reason: "Telegram identity is explicitly ignored" };
+  }
+  if (existingIdentity?.status === "approved") {
+    const record = existingIdentity.targetRecordId ? await getPersonSummary(existingIdentity.targetRecordId) : null;
     if (record) {
-      return {
-        status: "resolved",
-        record,
-        candidates: [record],
-        confidence: 1,
-        reason: `approved Telegram identity mapping: ${existingIdentity.recordId}`,
-      };
+      return { status: "resolved", record, candidates: [record], confidence: 1,
+        reason: `approved Telegram identity mapping: ${existingIdentity.recordId}` };
     }
+    // Do not silently redirect an approved mapping if its target disappears.
+    return { status: "blocked", candidates: [], confidence: 0,
+      preservedIdentity: existingIdentity, reason: "Approved Telegram identity target is missing; review required" };
+  }
+
+  const byUserId = await findPersonCandidatesByTelegramUserId(input.telegramUserId);
+  if (byUserId.length === 1) {
+    return { status: "resolved", record: byUserId[0], candidates: byUserId,
+      confidence: 0.99, reason: "exact Telegram user ID match" };
+  }
+  // Conflicting stable IDs cannot be disambiguated using mutable profile fields.
+  if (byUserId.length > 1) {
+    return { status: "ambiguous", candidates: uniquePeople(byUserId), confidence: 0,
+      reason: "Multiple people share the Telegram user ID; review required" };
   }
 
   const candidates: PersonSummary[] = [];
-
-  const byUserId = await findPersonCandidatesByTelegramUserId(input.telegramUserId);
-  candidates.push(...byUserId);
-  if (byUserId.length === 1) {
-    return {
-      status: "resolved",
-      record: byUserId[0],
-      candidates: uniquePeople(candidates),
-      confidence: 0.99,
-      reason: "exact Telegram user ID match",
-    };
-  }
-
-  if (input.phone) {
-    const byPhone = await findPersonCandidatesByPhone(input.phone);
-    candidates.push(...byPhone);
-    if (byPhone.length === 1) {
-      return {
-        status: "resolved",
-        record: byPhone[0],
-        candidates: uniquePeople(candidates),
-        confidence: 0.95,
-        reason: "phone number match",
-      };
-    }
-  }
-
+  if (input.phone) candidates.push(...await findPersonCandidatesByPhone(input.phone));
   const username = identityUsername(input);
-  if (username) {
-    const byUsername = await findPersonCandidatesByUsername(username);
-    candidates.push(...byUsername);
-    if (byUsername.length === 1) {
-      return {
-        status: "resolved",
-        record: byUsername[0],
-        candidates: uniquePeople(candidates),
-        confidence: 0.93,
-        reason: `Telegram username match: ${username}`,
-      };
-    }
-  }
-
+  if (username) candidates.push(...await findPersonCandidatesByUsername(username));
   const displayName = identityDisplayName(input);
-  if (hasFullIdentityName(input)) {
-    const byFullName = await findPersonCandidatesByName(displayName);
-    candidates.push(...byFullName);
-
-    const target = normalizeIdentityName(displayName);
-    const exact = byFullName.filter((candidate) => normalizeIdentityName(candidate.name) === target);
-    if (exact.length === 1) {
-      return {
-        status: "resolved",
-        record: exact[0],
-        candidates: uniquePeople(candidates),
-        confidence: 0.87,
-        reason: `exact full-name match: ${exact[0].name}`,
-      };
-    }
-  } else if (displayName && displayName !== input.telegramUserId) {
+  if (displayName && displayName !== input.telegramUserId) {
     candidates.push(...await findPersonCandidatesByName(displayName));
   }
-
   const unique = uniquePeople(candidates);
-  const companyHintMatch = findCompanyHintCandidate(unique, input.companyHints);
-  if (companyHintMatch) {
-    return {
-      status: "resolved",
-      record: companyHintMatch.candidate,
-      candidates: unique,
-      confidence: 0.82,
-      reason: `company hint match: ${companyHintMatch.hint} -> ${companyHintMatch.candidate.name}`,
-    };
-  }
-
-  if (unique.length > 0) {
-    return {
-      status: "ambiguous",
-      candidates: unique,
-      confidence: 0.5,
-      reason: `found ${unique.length} possible person record(s), but no safe identity match`,
-    };
-  }
-
   return {
-    status: "missing",
-    candidates: [],
-    confidence: 0,
-    reason: `no person matched ${displayName}`,
+    status: unique.length ? "ambiguous" : "missing", candidates: unique, confidence: 0,
+    reason: unique.length
+      ? "Mutable Telegram profile matches are suggestions only; explicit identity approval required"
+      : `no person matched ${displayName}`,
   };
 }
 
@@ -746,6 +664,12 @@ export async function reconcileTelegramIdentity(
   identity: TelegramIdentity;
 }> {
   const resolution = await resolvePersonIdentity(input, objectSlug);
+  if (resolution.status === "blocked" && resolution.preservedIdentity) {
+    return { identityRecordId: resolution.preservedIdentity.recordId || "",
+      resolution, identity: resolution.preservedIdentity.status === "ignored"
+        ? resolution.preservedIdentity
+        : { ...resolution.preservedIdentity, status: "needs_review", reason: resolution.reason } };
+  }
   const displayName = identityDisplayName(input);
   const username = identityUsername(input);
 
@@ -793,7 +717,7 @@ export async function findPersonByPhone(phone: string): Promise<string | null> {
 
 export async function findPersonByTelegramUserId(telegramUserId: string): Promise<string | null> {
   const matches = await findPersonCandidatesByTelegramUserId(telegramUserId);
-  return matches[0]?.recordId || null;
+  return matches.length === 1 ? matches[0].recordId : null;
 }
 
 /**
@@ -816,29 +740,17 @@ export async function findPersonByTelegramUsername(username: string): Promise<st
 }
 
 /**
- * Find a Person by stable Telegram user ID, phone, then Telegram username.
+ * Find a Person only by an unambiguous stable Telegram user ID.
  */
 export async function findPerson(
   phone: string | undefined,
   username: string | undefined,
   telegramUserId?: string,
 ): Promise<string | null> {
-  if (telegramUserId) {
-    const byTelegramUserId = await findPersonByTelegramUserId(telegramUserId);
-    if (byTelegramUserId) return byTelegramUserId;
-  }
-
-  if (phone) {
-    const byPhone = await findPersonByPhone(phone);
-    if (byPhone) return byPhone;
-  }
-
-  if (username) {
-    const byUsername = await findPersonByTelegramUsername(username);
-    if (byUsername) return byUsername;
-  }
-
-  return null;
+  // Profile fields are discovery hints, not proof of account ownership.
+  void phone; void username;
+  if (!telegramUserId) return null;
+  return findPersonByTelegramUserId(telegramUserId);
 }
 
 export interface NewPersonData {
@@ -886,13 +798,13 @@ export async function createPerson(data: NewPersonData): Promise<string> {
 }
 
 /**
- * Find a Person by phone/username, or create one if not found.
+ * Find a Person by stable Telegram ID, or create one if not found.
  */
 export async function findOrCreatePerson(data: NewPersonData): Promise<string> {
-  const existing = await findPerson(data.phone, data.username, data.telegramUserId);
-  if (existing) return existing;
-
-  return createPerson(data);
+  // Retain the legacy helper without retaining an alternate approval bypass.
+  const person = await resolveOrCreatePerson(data, { autoCreate: true });
+  if (!person) throw new Error("Telegram identity requires review or a stable user ID");
+  return person.recordId;
 }
 
 export async function resolveOrCreatePerson(
@@ -903,14 +815,8 @@ export async function resolveOrCreatePerson(
     source?: string;
   },
 ): Promise<PersonSyncResolution | null> {
-  if (!data.telegramUserId) {
-    if (!options.autoCreate) return null;
-    return {
-      recordId: await findOrCreatePerson(data),
-      status: "created",
-      reason: "created because Telegram user ID was unavailable",
-    };
-  }
+  // Without a stable ID, never fall back to a name/phone/username merge.
+  if (!data.telegramUserId) return null;
 
   const identityInput: TelegramIdentityInput = {
     telegramUserId: data.telegramUserId,
@@ -933,7 +839,7 @@ export async function resolveOrCreatePerson(
     };
   }
 
-  if (!options.autoCreate) return null;
+  if (!options.autoCreate || reconciliation.resolution.status !== "missing") return null;
 
   const recordId = await createPerson(data);
   await upsertTelegramIdentity(options.identityObjectSlug || "telegram_identities", {

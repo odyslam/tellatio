@@ -128,7 +128,7 @@ folders sync-attio [--folder Attio]              Add approved association chats 
 discover associations [--since X] [--limit N]    Dry-run likely Attio chat associations
 associations status                              Association counts and records
 associations upsert --chat-id ...                Create/update an Attio association (--dry-run supported)
-associations reconcile [--since X]               Resolve and approve exact company matches (--dry-run supported)
+associations reconcile [--since X]               Propose company destinations for review (--dry-run supported)
 identities status                                Identity counts and records
 identities reconcile [--since X]                 Resolve Telegram users to Attio People (--dry-run supported)
 identities candidates [--name/--username X]      Search People candidates
@@ -230,6 +230,8 @@ tellatio associations reconcile --since 3d --limit 100 --only-chats <chat_ids> -
 ```
 
 Use `--include-explicit-groups` with `--only-chats` to scope participant scans to reviewed groups that lack approved associations.
+
+Reconciliation proposes destinations; it does not approve new company associations. Profile names, usernames, phone numbers, and company hints are not proof of identity. Automatic person links require a unique stable Telegram ID or an existing approved identity mapping. Review candidates and explicitly approve destinations with the guarded `associations upsert` / `identities upsert` commands. Existing approvals are preserved, not retroactively audited.
 
 Identity matching uses Telegram user IDs, phone numbers, usernames, exact full names, and company context. Missing or ambiguous matches go to `needs_review` instead of creating duplicate People. Approved identity mappings and Person email domains take precedence over title-based company guesses; conflicting evidence leaves an association in review. Exact company matches still need a concrete Attio record ID before approval.
 

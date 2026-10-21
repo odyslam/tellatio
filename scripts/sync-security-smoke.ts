@@ -44,10 +44,36 @@ attio.upsertNote = async () => { writes++; if (fail) throw new Error("simulated 
   store = openState(root);
   assert.equal(store.getAllRuns().sync.status, "failed");
   store.close();
+  const oneChat = { peer: {}, chatInfo: { idStr: "123", title: "fixture", type: "dm", isGroup: false } };
+  telegram.getMessages = async () => [{ id: 2, date: yesterday, senderIdStr: "123", senderName: "Sender", text: "pending review" }];
+  const beforeBoundary = writes;
+  telegram.getRecentChats = async () => [{ ...oneChat, chatInfo: { ...oneChat.chatInfo, type: "group", isGroup: true } }];
+  await assert.rejects(runSync(config), /chat type does not match/);
+  telegram.getRecentChats = async () => [oneChat, { ...oneChat, chatInfo: { ...oneChat.chatInfo, type: "group", isGroup: true } }];
+  await assert.rejects(runSync(config), /peer namespaces/);
+  telegram.getRecentChats = async () => [oneChat];
+  attio.listApprovedTelegramAssociations = async () => [{ ...association, telegramChatType: "unknown" }];
+  await assert.rejects(runSync(config), /chat type does not match/);
+  assert.equal(writes, beforeBoundary);
+  store = openState(root); assert.equal(store.getChatState("123").lastMessageId, 1); store.close();
+
+  // Legacy folder mode must not consume messages awaiting identity approval.
+  telegram.getFolderChatIds = async () => [{}];
+  telegram.resolveChat = async () => oneChat.chatInfo;
+  telegram.getUserInfo = async () => ({ userIdStr: "123", firstName: "Unverified" });
+  attio.resolveOrCreatePerson = async () => null;
+  const folderConfig = { ...config, syncSource: "folder", folderName: "Attio" } as Config;
+  await assert.rejects(runSync(folderConfig), /identity requires review/);
+  telegram.resolveChat = async () => ({ ...oneChat.chatInfo, type: "group", isGroup: true });
+  telegram.getGroupParticipants = async () => [{ userIdStr: "123", firstName: "Unverified" }];
+  await assert.rejects(runSync(folderConfig), /participant Telegram identity requires review/);
+  assert.equal(writes, beforeBoundary);
+  store = openState(root); assert.equal(store.getChatState("123").lastMessageId, 1); store.close();
+
   attio.listApprovedTelegramAssociations = async () => { throw new Error("simulated selection failure"); };
   await assert.rejects(runSync(config), /selection failure/);
   const linkDir = path.join(root, "link-state"); fs.mkdirSync(linkDir);
   fs.symlinkSync(path.join(root, "missing"), path.join(linkDir, "sync-state.db-wal"));
   assert.throws(() => openState(linkDir), /Unsafe/);
-  console.log("sync-security-smoke: PASS (write failure retains cursor, retry dedupes, failed reads are not success, private state, symlink refusal)");
+  console.log("sync-security-smoke: PASS (write failure retains cursor, retry dedupes, failed reads are not success, private state, symlink refusal, peer-type boundaries, identity-review cursor retention)");
 })().catch(err => { console.error(err); process.exitCode = 1; }).finally(() => fs.rmSync(root, { recursive: true, force: true }));

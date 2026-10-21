@@ -1430,7 +1430,12 @@ async function cmdAssociationsReconcile(flags: Record<string, string>): Promise<
       continue;
     }
 
-    let status: TelegramAssociation["status"] = "needs_review";
+    if (existing?.status === "ignored") {
+      result.ignored.push({ chat: suggestion.telegramChatTitle, reason: "explicitly ignored association preserved" });
+      continue;
+    }
+
+    const status: TelegramAssociation["status"] = "needs_review";
     let targetRecordId = "";
     let resolutionReason = "";
 
@@ -1457,13 +1462,12 @@ async function cmdAssociationsReconcile(flags: Record<string, string>): Promise<
           identitySignals,
         });
       } else if (companySignalForTarget?.recordId) {
-        status = "approved";
         targetRecordId = companySignalForTarget.recordId;
         resolutionReason = `participant ${companySignalForTarget.source || "company"} signal match: ${companySignalForTarget.name}`;
         if (targetName !== suggestion.suggestedTargetName) {
           resolutionReason = `alias ${suggestion.suggestedTargetName} -> ${targetName}; ${resolutionReason}`;
         }
-        result.approved.push({
+        result.needsReview.push({
           chat: suggestion.telegramChatTitle,
           company: companySignalForTarget.name,
           recordId: companySignalForTarget.recordId,
@@ -1481,9 +1485,8 @@ async function cmdAssociationsReconcile(flags: Record<string, string>): Promise<
           resolutionReason = `alias ${suggestion.suggestedTargetName} -> ${targetName}; ${resolutionReason}`;
         }
         if (resolution.status === "resolved" && resolution.record) {
-          status = "approved";
           targetRecordId = resolution.record.recordId;
-          result.approved.push({
+          result.needsReview.push({
             chat: suggestion.telegramChatTitle,
             company: resolution.record.name,
             recordId: resolution.record.recordId,
@@ -1529,7 +1532,7 @@ async function cmdAssociationsReconcile(flags: Record<string, string>): Promise<
       targetRecordId,
       status,
       confidence: suggestion.confidence,
-      reason: [...suggestion.reasons, resolutionReason].filter(Boolean).join("; "),
+      reason: [...suggestion.reasons, resolutionReason, "Heuristic candidate only; explicit destination approval required"].filter(Boolean).join("; "),
       syncMode: suggestion.syncMode,
       lastObservedAt: suggestion.lastMessageAt || new Date().toISOString(),
     };
@@ -1819,7 +1822,7 @@ async function resolveIdentityDryRun(
     identityRecordId: undefined,
     resolution,
     identity: {
-      status: resolution.status === "resolved" ? "approved" : "needs_review",
+      status: resolution.preservedIdentity?.status === "ignored" ? "ignored" : resolution.status === "resolved" ? "approved" : "needs_review",
       confidence: resolution.confidence,
       reason: [input.source, resolution.reason].filter(Boolean).join("; "),
       targetRecordId: resolution.record?.recordId || "",

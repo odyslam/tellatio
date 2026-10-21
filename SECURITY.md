@@ -29,6 +29,14 @@ Only reads (GET and record-query POST) retry automatically, with bounded backoff
 
 Persistent CLI/MCP commands serialize the complete shared-client/output lifecycle with at most 16 pending commands. Read-only chat/query arguments and result counts are bounded. This prevents concurrent command state mix-ups; it is not a sandbox against a malicious MCP client.
 
+## Identity and destination approval
+
+Automatic person linking requires one unambiguous stable Telegram user ID match or an existing approved identity mapping. Names, usernames, phone numbers, and company/profile hints are discovery candidates only, never automatic proof of identity. Duplicate/malformed identity mappings fail closed; ignored identities and missing approved targets cannot silently fall back to another person or auto-create a replacement. Auto-create remains opt-in and requires a stable ID and no candidate match.
+
+The sync worker rejects unknown/mismatched approved peer types and visible collisions between Telegram peer namespaces before fetching messages. Legacy SQLite keys still use bare chat IDs: this check is not a completed namespaced-state migration and cannot detect collisions with historical peers absent from discovery. Unresolved folder-mode identities fail the cycle without advancing cursors, so approval does not silently lose the pending messages.
+
+Existing approved mappings are not revoked or re-audited by deployment. Older heuristic approvals should be reviewed separately. Association reconciliation derives review-only company candidates from untrusted chat/profile metadata and never promotes them to approved. Existing ignored/approved associations are preserved; enable new destinations only through explicit guarded approval.
+
 ## Sync integrity
 
 Remote-write failures must not advance chat cursors. Retries deduplicate local transcript entries; failed fetches and association-list API errors produce failed run state, not a clean-success claim. The worker syncs completed UTC days, not today's messages. An idle successful cycle proves polling, not a fresh Attio write. Old transcripts are not retroactively rerendered on deployment.
