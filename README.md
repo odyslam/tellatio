@@ -371,12 +371,31 @@ The CLI write guard covers gated outbound and destructive Telegram operations:
 | `TELLATIO_WRITE_GUARD` | Behavior |
 | :--- | :--- |
 | `off` | No write gating |
-| `warn` **(default)** | Warn on stderr and proceed |
-| `enforce` | Block gated operations unless `TELLATIO_ALLOW_WRITES` permits them |
+| `warn` | Explicit unsafe compatibility mode: warn and proceed |
+| `enforce` **(default)** | Block gated operations unless `TELLATIO_ALLOW_WRITES` permits them |
+| Unrecognized value | Reject writes, even with `TELLATIO_ALLOW_WRITES` |
 
 Set `TELLATIO_WRITE_GUARD=enforce` in the invoking environment. Have a human grant `TELLATIO_ALLOW_WRITES=1` for a specific approved invocation. The values `true`, `yes`, and `on` also permit writes. Read-only commands and supported `--dry-run` previews do not require this permission.
 
-**The guard is not a sandbox.** An agent with shell or environment control may set the permission variable itself. Keep approval and credential controls outside the agent's control when you need a hard boundary. Attio reconciliation writes need their own review; the Telegram write guard does not replace CRM approval.
+**The guard is not a sandbox.** An agent with shell or environment control may set the permission variable itself. Keep approval and credential controls outside the agent's control when you need a hard boundary. Attio reconciliation/upsert writes and media downloads are also gated; dry-run previews remain available. The unattended worker is separate and continues approved sync writes.
+
+### Read-only agents and media confinement
+
+Use `bin/tellatio-readonly --mcp` for agents that only need to inspect Telegram. Its MCP tool list contains only `me`, `chats`, `info`, `read`, and `search`; changing write-guard environment variables cannot add write tools to this server. The full CLI remains available for explicitly approved operations.
+
+**For a real host boundary**, expose only that read-only MCP process from a container or separate OS account. Do not give the consuming agent a host shell, the session files, the full CLI, or writable access to this repository. A same-user shell can bypass application guards by reading credentials directly. Example, after building the image, with a private env file containing only the required Telegram credentials:
+
+```bash
+docker run --rm -i --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  --user node --tmpfs /tmp --env-file /secure/telegram-readonly.env \
+  tellatio node dist/cli-readonly.js --mcp
+```
+
+No home-directory, Docker-socket, or host-repository mounts should be added. Telegram sessions themselves are not read-only credentials; protect the container and its host. This setup is a supported option, not an assertion that your agent is already isolated.
+
+Media commands now accept a **single non-hidden file name**, not a path. Uploads read only regular, non-symlink, non-hardlinked files placed in `<DATA_DIR>/uploads/`. Downloads create new owner-only files in `<DATA_DIR>/downloads/`, never overwrite existing files, and reject symlinks. Both have a fixed 25 MiB limit. Put only files you intend to share in `uploads/`; downloaded content is never automatically opened or executed. Both operations require write permission.
+
+Synced CRM transcripts are explicitly marked untrusted, with remote Markdown/HTML escaped and message lines quoted. This prevents formatting from forging transcript structure; it does not make instructions inside messages trustworthy. Existing notes acquire the new rendering on their next transcript update, not retroactively at deployment.
 
 ### Secrets
 
@@ -387,7 +406,7 @@ TELEGRAM_SESSION_FILE=/run/secrets/telegram_session
 ATTIO_API_KEY_FILE=/run/secrets/attio_api_key
 ```
 
-`<NAME>_FILE` takes precedence over `<NAME>`; the worker reads and trims the file. The CLI and Attio setup script use their environment variables. Do not commit credentials or session strings.
+`<NAME>_FILE` takes precedence over `<NAME>`; the worker reads and trims the file. The CLI also accepts these file-based secrets; the Attio setup script uses environment variables. Do not commit credentials or session strings. Keep secret files owner-readable only (`chmod 600`), and state/export directories owner-only (`chmod 700`). New state databases and media files are private by default.
 
 <details>
 <summary><strong>Optional egress hardening with iron-proxy</strong></summary>

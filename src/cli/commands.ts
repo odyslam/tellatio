@@ -1,4 +1,6 @@
 import { Api } from "telegram";
+import { CustomFile } from "telegram/client/uploads";
+import { readUpload, createDownload } from "../media";
 import * as fs from "node:fs";
 import { loadConfig } from "../config";
 import { sanitizeUntrusted, UNTRUSTED_ADVISORY } from "../guard";
@@ -14,6 +16,7 @@ import {
   assertEntityAllowed,
   assertIdentifierAllowed,
   assertNotBanFolderName,
+  assertWritesAllowed,
   banEntryFromEntity,
   banFolderNameFromEnv,
   chatDisplayName,
@@ -1197,6 +1200,7 @@ async function cmdFoldersReorder(positional: string[], flags: Record<string, str
 }
 
 async function cmdFoldersSyncAttio(flags: Record<string, string>): Promise<void> {
+  if (!dryRun(flags)) assertWritesAllowed("cmdFoldersSyncAttio");
   const folderName = flags["folder"] || process.env["TELEGRAM_FOLDER_NAME"] || "Attio";
   const objectSlug = flags["object"] || process.env["TELLATIO_ASSOCIATION_OBJECT"] || "telegram_associations";
   const includePeople = flags["include-people"] !== "false";
@@ -1268,6 +1272,7 @@ async function discoverAssociationSuggestions(
 // ── associations ────────────────────────────────────────────────
 
 async function cmdAssociationsUpsert(flags: Record<string, string>): Promise<void> {
+  if (!dryRun(flags)) assertWritesAllowed("cmdAssociationsUpsert");
   const objectSlug = flags["object"] || process.env["TELLATIO_ASSOCIATION_OBJECT"] || "telegram_associations";
   const chatId = flags["chat-id"];
   const title = flags["title"];
@@ -1331,6 +1336,7 @@ async function cmdAssociationsUpsert(flags: Record<string, string>): Promise<voi
 }
 
 async function cmdAssociationsReconcile(flags: Record<string, string>): Promise<void> {
+  if (!dryRun(flags)) assertWritesAllowed("cmdAssociationsReconcile");
   const objectSlug = flags["object"] || process.env["TELLATIO_ASSOCIATION_OBJECT"] || "telegram_associations";
   const identityObjectSlug = flags["identity-object"] || process.env["TELLATIO_IDENTITY_OBJECT"] || "telegram_identities";
   const limit = numFlag(flags, "limit", 100);
@@ -1741,6 +1747,7 @@ async function collectIdentityInputs(flags: Record<string, string>): Promise<Tel
 }
 
 async function cmdIdentitiesReconcile(flags: Record<string, string>): Promise<void> {
+  if (!dryRun(flags)) assertWritesAllowed("cmdIdentitiesReconcile");
   const identityObjectSlug = flags["identity-object"] || process.env["TELLATIO_IDENTITY_OBJECT"] || "telegram_identities";
   const inputs = await collectIdentityInputs(flags);
   const isDryRun = dryRun(flags);
@@ -1844,6 +1851,7 @@ async function cmdIdentitiesCandidates(flags: Record<string, string>): Promise<v
 }
 
 async function cmdIdentitiesUpsert(flags: Record<string, string>): Promise<void> {
+  if (!dryRun(flags)) assertWritesAllowed("cmdIdentitiesUpsert");
   const identityObjectSlug = flags["identity-object"] || process.env["TELLATIO_IDENTITY_OBJECT"] || "telegram_identities";
   const telegramUserId = flags["telegram-user-id"];
   const displayName = flags["display-name"];
@@ -2610,7 +2618,8 @@ async function cmdMediaSend(positional: string[], flags: Record<string, string>)
   const caption = positional.slice(2).join(" ") || undefined;
   if (!chatId || !filePath) die("Usage: tellatio media send <chat> <file-path> [caption] [--voice] [--video-note]");
 
-  if (!fs.existsSync(filePath)) die(`File not found: ${filePath}`);
+  assertWritesAllowed("send media");
+  const upload = readUpload(dataDirFromEnv(), filePath);
 
   assertIdentifierAllowed(chatId, "send media to");
   const entity = await resolveEntity(chatId);
@@ -2619,7 +2628,7 @@ async function cmdMediaSend(positional: string[], flags: Record<string, string>)
   const videoNote = flags["video-note"] === "true";
 
   const result = await client.sendFile(entity, {
-    file: filePath,
+    file: new CustomFile(upload.name, upload.buffer.length, "", upload.buffer),
     caption,
     voiceNote,
     videoNote,
@@ -2628,6 +2637,7 @@ async function cmdMediaSend(positional: string[], flags: Record<string, string>)
 }
 
 async function cmdMediaDownload(positional: string[]): Promise<void> {
+  assertWritesAllowed("download media");
   const chatId = positional[0];
   const msgId = positional[1];
   const outputPath = positional[2];
@@ -2642,11 +2652,17 @@ async function cmdMediaDownload(positional: string[]): Promise<void> {
   const msg = messages[0];
   if (!msg.media || msg.media instanceof Api.MessageMediaEmpty) die("No media in this message");
 
-  const buffer = await client.downloadMedia(msg) as Buffer;
-  if (!buffer) die("Failed to download media");
-
-  fs.writeFileSync(outputPath, buffer);
-  out({ downloaded: outputPath, size: buffer.length });
+  const download = createDownload(dataDirFromEnv(), outputPath);
+  try {
+    await client.downloadMedia(msg, { outputFile: download.writer as any });
+    if (download.size === 0) die("No downloadable media bytes");
+    out({ downloaded: download.path, size: download.size });
+  } catch (err) {
+    download.discard();
+    throw err;
+  } finally {
+    download.close();
+  }
 }
 
 // ── profile ─────────────────────────────────────────────────────

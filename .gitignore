@@ -38,7 +38,8 @@ yarn-error.log*
 coverage/
 .nyc_output/
 
-# Sync state
+# Sync state and local CRM exports
+backups/
 data/
 
 # Misc

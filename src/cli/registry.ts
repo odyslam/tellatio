@@ -719,7 +719,7 @@ const media = Cli.create("media", { description: "Send and download Telegram med
     description: "Send a file",
     args: z.object({
       chat: z.string().describe("Username, phone, or numeric chat ID"),
-      filePath: z.string().describe("Local file path"),
+      filePath: z.string().describe("File name inside DATA_DIR/uploads (no paths or symlinks)"),
       caption: z.string().optional().describe("Caption; quote it if it contains spaces"),
     }),
     options: z.object({
@@ -736,9 +736,9 @@ const media = Cli.create("media", { description: "Send and download Telegram med
     args: z.object({
       chat: z.string().describe("Username, phone, or numeric chat ID"),
       msgId: z.string().describe("Message ID"),
-      outputPath: z.string().describe("Output file path"),
+      outputPath: z.string().describe("New file name inside DATA_DIR/downloads (no paths or overwrite)"),
     }),
-    run: (c) => runTelegram(() => cmdMediaDownload([c.args.chat, c.args.msgId, c.args.outputPath])),
+    run: (c) => runTelegramWrite("download media", () => cmdMediaDownload([c.args.chat, c.args.msgId, c.args.outputPath])),
   });
 
 const profile = Cli.create("profile", { description: "Manage your Telegram profile" })

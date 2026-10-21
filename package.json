@@ -1,21 +1,23 @@
 {
   "name": "tellatio",
-  "description": "Telegram → Attio sync service",
+  "description": "Telegram \u2192 Attio sync service",
   "private": true,
   "version": "0.1.0",
   "bin": {
-    "tellatio": "./bin/tellatio"
+    "tellatio": "./bin/tellatio",
+    "tellatio-readonly": "./bin/tellatio-readonly"
   },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "lint": "pnpm typecheck",
-    "test": "ts-node scripts/guard-smoke.ts && ts-node scripts/cli-logic-smoke.ts",
+    "test": "ts-node scripts/guard-smoke.ts && ts-node scripts/cli-logic-smoke.ts && ts-node scripts/secret-smoke.ts && ts-node scripts/state-smoke.ts && ts-node scripts/security-smoke.ts && ts-node scripts/sync-security-smoke.ts && ts-node scripts/cli-security-smoke.ts",
     "dev": "ts-node src/index.ts",
     "start": "node dist/index.js",
     "login:telegram": "node scripts/telegram-login.js",
     "login:telegram:qr": "node scripts/telegram-login.js --qr",
-    "tellatio": "bin/tellatio"
+    "tellatio": "bin/tellatio",
+    "test:readonly": "node scripts/readonly-mcp-smoke.js"
   },
   "devDependencies": {
     "@types/better-sqlite3": "7.6.13",
@@ -29,11 +31,22 @@
     "incur": "0.4.5",
     "qrcode-terminal": "0.12.0",
     "telegram": "2.26.22",
-    "undici": "8.3.0"
+    "undici": "8.12.3"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
       "better-sqlite3"
-    ]
+    ],
+    "overrides": {
+      "@toon-format/toon": "2.3.1",
+      "ip-address": "10.7.4",
+      "node-gyp>undici": "6.29.1",
+      "tar": "7.5.22",
+      "diff@4": "4.0.4"
+    }
+  },
+  "packageManager": "pnpm@10.32.1",
+  "engines": {
+    "node": ">=22.19.0"
   }
 }

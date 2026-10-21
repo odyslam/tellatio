@@ -61,18 +61,18 @@ withEnv({ TELLATIO_WRITE_GUARD: "enforce", TELLATIO_ALLOW_WRITES: "1" }, () => {
   assert.equal(d.allowed, true);
 });
 
-// default (unset) -> warn and allowed
+// default (unset) -> enforce and denied
 withEnv({ TELLATIO_WRITE_GUARD: undefined, TELLATIO_ALLOW_WRITES: undefined }, () => {
   const d = evaluateWriteGuard("send message");
-  assert.equal(d.mode, "warn");
-  assert.equal(d.allowed, true);
+  assert.equal(d.mode, "enforce");
+  assert.equal(d.allowed, false);
 });
 
-// unknown mode -> treated as warn and allowed
+// unknown mode -> fail closed
 withEnv({ TELLATIO_WRITE_GUARD: "bogus", TELLATIO_ALLOW_WRITES: undefined }, () => {
   const d = evaluateWriteGuard("send message");
-  assert.equal(d.mode, "warn");
-  assert.equal(d.allowed, true);
+  assert.equal(d.mode, "enforce");
+  assert.equal(d.allowed, false);
 });
 
 // sanitizeUntrusted: strips bidi override (U+202E) and zero-width (U+200B), keeps visible text.

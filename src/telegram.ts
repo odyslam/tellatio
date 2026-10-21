@@ -1,6 +1,7 @@
 import { TelegramClient } from "telegram";
 import { StringSession } from "telegram/sessions";
 import { Api } from "telegram";
+import { sanitizeUntrusted } from "./guard";
 import type { Config } from "./config";
 import type { BannedTelegramUser } from "./bans";
 
@@ -149,18 +150,18 @@ export async function getFolderChatIds(
 function entityToChatInfo(entity: unknown): ChatInfo | null {
   if (entity instanceof Api.User) {
     const name = [entity.firstName, entity.lastName].filter(Boolean).join(" ") || entity.username || "Unknown";
-    return { idStr: entity.id.toString(), username: entity.username, title: name, isGroup: false, type: "dm" };
+    return { idStr: entity.id.toString(), username: entity.username, title: sanitizeUntrusted(name), isGroup: false, type: "dm" };
   }
 
   if (entity instanceof Api.Chat) {
-    return { idStr: entity.id.toString(), title: entity.title, isGroup: true, type: "group" };
+    return { idStr: entity.id.toString(), title: sanitizeUntrusted(entity.title), isGroup: true, type: "group" };
   }
 
   if (entity instanceof Api.Channel) {
     return {
       idStr: entity.id.toString(),
       username: entity.username,
-      title: entity.title,
+      title: sanitizeUntrusted(entity.title),
       isGroup: true,
       type: entity.megagroup ? "supergroup" : "channel",
     };
@@ -208,6 +209,7 @@ export async function getBanFolderUsers(folderName: string): Promise<BannedTeleg
       if (banned) users.push(banned);
     } catch (err) {
       console.warn(`[telegram] Failed to resolve ban folder peer in "${folderName}":`, err);
+      throw new Error("Cannot resolve ban-list peer; refusing unfiltered reads");
     }
   }
 

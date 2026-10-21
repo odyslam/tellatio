@@ -1,3 +1,4 @@
+process.umask(0o077);
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadConfig } from "./config";

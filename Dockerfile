@@ -1,29 +1,25 @@
-FROM node:22-slim
-
-# Toolchain for compiling native modules (better-sqlite3) when no prebuilt binary
-# matches this image's platform/ABI. Cleaned up in the same layer to keep the image small.
+FROM node:22-slim AS build
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends python3 make g++ gosu \
+  && apt-get install -y --no-install-recommends python3 make g++ \
   && rm -rf /var/lib/apt/lists/*
-
-RUN npm install -g pnpm@9
-
+RUN npm install -g pnpm@10.32.1
 WORKDIR /app
-
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile --prod=false
-
+RUN pnpm install --frozen-lockfile
 COPY tsconfig.json ./
-COPY bin/ ./bin/
 COPY src/ ./src/
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint
+COPY scripts/ ./scripts/
+RUN pnpm test && pnpm build && pnpm test:readonly && pnpm prune --prod
 
-RUN pnpm build
-
-# Create data directory for sync state, owned by the non-root runtime user
-RUN chmod +x /usr/local/bin/docker-entrypoint \
-  && mkdir -p /data \
-  && chown -R node:node /data
-
+FROM node:22-slim
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends gosu \
+  && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --chmod=644 --from=build /app/package.json ./
+COPY --from=build /app/node_modules ./node_modules/
+COPY --from=build /app/dist ./dist/
+COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint
+RUN mkdir -p /data && chmod 700 /data && chown node:node /data
 ENTRYPOINT ["docker-entrypoint"]
 CMD ["node", "dist/index.js"]

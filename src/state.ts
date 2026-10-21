@@ -480,8 +480,25 @@ export class StateStore {
  * run schema migrations, and perform the one-time import of any legacy sync-state.json.
  */
 export function openState(dataDir: string): StateStore {
-  fs.mkdirSync(dataDir, { recursive: true });
-  const driver = openDriver(dbPathFor(dataDir));
+  fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  if (!fs.lstatSync(dataDir).isDirectory()) throw new Error("State directory must not be a symlink");
+  fs.chmodSync(dataDir, 0o700);
+  const dbPath = dbPathFor(dataDir);
+  for (const suffix of ["", "-wal", "-shm"]) {
+    const file = dbPath + suffix;
+    // lstat also catches dangling symlinks (existsSync would miss them).
+    let stat: fs.Stats;
+    try { stat = fs.lstatSync(file); } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw err;
+    }
+    if (!stat.isFile() || stat.nlink !== 1) throw new Error("Unsafe sync state file");
+    fs.chmodSync(file, 0o600);
+  }
+  // Pre-create privately; WAL/SHM inherit SQLite's database permissions.
+  const fd = fs.openSync(dbPath, fs.constants.O_CREAT | fs.constants.O_RDWR | fs.constants.O_NOFOLLOW, 0o600);
+  fs.closeSync(fd);
+  const driver = openDriver(dbPath);
   runMigrations(driver);
   importLegacyJson(driver, dataDir);
   return new StateStore(driver, dataDir);

@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { readSecret } from "../secret";
 import * as path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -51,7 +52,7 @@ function loadEnv(): void {
 }
 
 function requireEnv(name: string): string {
-  const v = process.env[name];
+  const v = readSecret(name);
   if (!v) { die(`Missing env var: ${name}`); }
   return v!;
 }
@@ -275,7 +276,9 @@ async function loadBanFolderUsers(folderName: string): Promise<BannedTelegramUse
           source: "folder",
         });
       }
-    } catch {}
+    } catch {
+      die("Cannot resolve ban-list peer; refusing unfiltered reads");
+    }
   }
 
   return users;

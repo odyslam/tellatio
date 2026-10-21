@@ -1,3 +1,4 @@
+import { formatTranscript } from "./transcript";
 import { Api } from "telegram";
 import * as telegram from "./telegram";
 import * as attio from "./attio";
@@ -27,34 +28,6 @@ function dateOfMessage(unixTimestamp: number): string {
 function completedDayMessages(messages: TelegramMessage[]): TelegramMessage[] {
   const today = todayUTC();
   return messages.filter((msg) => dateOfMessage(msg.date) < today);
-}
-
-function formatTranscript(messages: StoredMessage[]): string {
-  if (messages.length === 0) return "";
-
-  const byDay = new Map<string, StoredMessage[]>();
-  for (const msg of messages) {
-    const date = dateOfMessage(msg.date);
-    const existing = byDay.get(date);
-    if (existing) {
-      existing.push(msg);
-    } else {
-      byDay.set(date, [msg]);
-    }
-  }
-
-  const sections: string[] = [];
-  const sortedDays = Array.from(byDay.entries()).sort(([a], [b]) => a.localeCompare(b));
-
-  for (const [date, dayMsgs] of sortedDays) {
-    const lines = dayMsgs.map((msg) => {
-      const time = new Date(msg.date * 1000).toISOString().slice(11, 16);
-      return `**${time}** _${msg.sender}:_ ${msg.text}`;
-    });
-    sections.push(`### ${date}\n\n${lines.join("\n\n")}`);
-  }
-
-  return sections.join("\n\n---\n\n");
 }
 
 function toStoredMessages(
@@ -108,6 +81,8 @@ async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, label: s
  */
 export async function runSync(config: Config): Promise<void> {
   const store = openState(config.dataDir);
+  let fetchFailures = 0;
+  let writeFailures = 0;
   try {
     const banList = compileBanList([
       ...parseEnvBannedUsers(),
@@ -141,11 +116,13 @@ export async function runSync(config: Config): Promise<void> {
         const result = await fetchChat(store, syncChat, me, config, banList);
         if (result) fetched.push(result);
       } catch (err) {
+        fetchFailures += 1;
         console.error(`[sync] Error fetching chat ${syncChat.chatInfo.title} (${syncChat.chatInfo.idStr}):`, err);
       }
     }
 
     if (fetched.length === 0) {
+      if (fetchFailures > 0) throw new Error(`${fetchFailures} chat fetch(es) failed; no clean sync result`);
       console.log("[sync] No new messages across any chats.");
       store.setRunState("sync", {
         status: "success",
@@ -169,12 +146,6 @@ export async function runSync(config: Config): Promise<void> {
       } else {
         await queueDMWork(chat, store, recordWork, config);
       }
-
-      // Update chat sync state. Transcript appends are deduped by Telegram message id,
-      // so even if a crash leaves chat state behind a write the next cycle is safe.
-      const maxId = Math.max(...chat.messages.map((m) => m.id));
-      const lastDate = dateOfMessage(chat.messages[chat.messages.length - 1].date);
-      store.setChatState(chat.chatInfo.idStr, { lastMessageId: maxId, lastSyncedDate: lastDate });
     }
 
     // Execute Attio writes — parallel across persons, sequential within each person
@@ -188,6 +159,7 @@ export async function runSync(config: Config): Promise<void> {
             try {
               await task();
             } catch (err) {
+              writeFailures += 1;
               console.error(`[sync] Attio write failed for ${recordKey}:`, err);
             }
           }
@@ -195,12 +167,31 @@ export async function runSync(config: Config): Promise<void> {
       );
     }
 
+    if (writeFailures > 0) throw new Error(`${writeFailures} Attio write(s) failed; checkpoints retained for retry`);
+    // Commit cursors only after all remote writes succeed. Local transcript inserts
+    // are deduplicated, so replay after a partial failure is safe.
+    for (const chat of fetched) {
+      // Update chat sync state. Transcript appends are deduped by Telegram message id,
+      // so even if a crash leaves chat state behind a write the next cycle is safe.
+      const maxId = Math.max(...chat.messages.map((m) => m.id));
+      const lastDate = dateOfMessage(chat.messages[chat.messages.length - 1].date);
+      store.setChatState(chat.chatInfo.idStr, { lastMessageId: maxId, lastSyncedDate: lastDate });
+    }
+    if (fetchFailures > 0) throw new Error(`${fetchFailures} chat fetch(es) failed; successful chats checkpointed`);
+
     store.setRunState("sync", {
       status: "success",
       finishedAt: new Date().toISOString(),
       counts: { selectedChats: syncChats.length, fetchedChats: fetched.length, recordWork: entries.length },
     });
-    console.log("[sync] Cycle complete");
+    console.log(`[sync] Cycle complete: selected=${syncChats.length} fetched=${fetched.length} records=${entries.length} writeFailures=0`);
+  } catch (err) {
+    store.setRunState("sync", {
+      status: "failed", finishedAt: new Date().toISOString(),
+      counts: { fetchFailures, writeFailures },
+      error: err instanceof Error ? err.message : "Sync failed",
+    });
+    throw err;
   } finally {
     store.close();
   }
@@ -244,7 +235,8 @@ async function getSyncChats(config: Config, banList: BanList): Promise<SyncChat[
     return selected;
   } catch (err) {
     console.error(`[sync] Failed to load approved associations from ${config.associationObjectSlug}:`, err);
-    return config.folderFallbackEnabled ? getFolderSyncChats(config.folderName, banList) : [];
+    // An API outage must not look like an empty, successfully synced selection.
+    throw err;
   }
 }
 
@@ -518,5 +510,6 @@ async function updatePersonStats(store: StateStore, recordId: string): Promise<v
     console.log(`[sync] Stats for ${recordId}: ${level}, ${totalMessages} msgs`);
   } catch (err) {
     console.error(`[sync] Failed to update stats for ${recordId}:`, err);
+    throw err;
   }
 }

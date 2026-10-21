@@ -34,7 +34,10 @@
     "src/db.ts",
     "src/strength.ts",
     "src/guard.ts",
+    "src/media.ts",
+    "src/transcript.ts",
     "src/cli.ts",
+    "src/cli-readonly.ts",
     "src/cli/**/*.ts"
   ],
   "exclude": ["node_modules", "dist"]

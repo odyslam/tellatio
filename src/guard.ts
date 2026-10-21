@@ -26,17 +26,20 @@ function isTruthyEnv(value: string | undefined): boolean {
  * Evaluate the write-guard for a given operation. Pure-ish: reads only
  * process.env and process.argv, never mutates state or performs I/O.
  *
- * Modes (TELLATIO_WRITE_GUARD, default "warn"): off | warn | enforce.
- * Unknown values are treated as "warn".
+ * Modes (TELLATIO_WRITE_GUARD, default "enforce"): off | warn | enforce.
+ * Unknown values fail closed, including when TELLATIO_ALLOW_WRITES is set.
  *
  * In "enforce" mode the operation is allowed only when TELLATIO_ALLOW_WRITES is
- * truthy (1|true|yes|on). This is an out-of-band signal on purpose: an agent that
- * has been prompt-injected can append a CLI flag to a command it emits, but cannot
- * set the worker's environment, so an env var is the stronger gate.
+ * truthy (1|true|yes|on). This is an accident-prevention gate, NOT a sandbox:
+ * a shell-capable caller can change these variables. Keep credentials and write
+ * capabilities outside the untrusted agent's OS sandbox for real isolation.
  */
 export function evaluateWriteGuard(operation: string): { mode: string; allowed: boolean; reason: string } {
-  const raw = (process.env["TELLATIO_WRITE_GUARD"] || "warn").trim().toLowerCase();
-  const mode = raw === "off" || raw === "warn" || raw === "enforce" ? raw : "warn";
+  const raw = (process.env["TELLATIO_WRITE_GUARD"] || "enforce").trim().toLowerCase();
+  if (!["off", "warn", "enforce"].includes(raw)) {
+    return { mode: "enforce", allowed: false, reason: "invalid write-guard mode" };
+  }
+  const mode = raw;
 
   if (mode === "off") {
     return { mode, allowed: true, reason: "write-guard disabled" };
@@ -58,7 +61,8 @@ export function evaluateWriteGuard(operation: string): { mode: string; allowed: 
 }
 
 /**
- * Strip characters that can be used to hide or reorder text for an agent:
+ * Strip terminal control sequences and characters used to hide/reorder text:
+ *   - C0/C1 controls, except horizontal tab and line feed
  *   - bidirectional overrides / isolates (U+202A..U+202E, U+2066..U+2069)
  *   - zero-width / invisible chars (U+200B, U+200C, U+200D, U+2060, U+FEFF)
  *
@@ -68,7 +72,7 @@ export function evaluateWriteGuard(operation: string): { mode: string; allowed: 
  */
 export function sanitizeUntrusted(text: string | undefined | null): string {
   if (text === undefined || text === null) return "";
-  return text.replace(/[\u202A-\u202E\u2066-\u2069\u200B\u200C\u200D\u2060\uFEFF]/g, "");
+  return text.replace(/[\x00-\x08\x0B-\x1F\x7F-\x9F\u202A-\u202E\u2066-\u2069\u200B\u200C\u200D\u2060\uFEFF]/g, "");
 }
 
 export function sanitizeUntrustedValue<T>(value: T): T {
