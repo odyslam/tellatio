@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { runSync } from "../src/sync";
-import { openState } from "../src/state";
-import type { Config } from "../src/config";
+import { runSync } from "../../src/sync/runner";
+import { openState } from "../../src/sync/state";
+import type { Config } from "../../src/sync/config";
 // Test doubles are confined to this process. No credentials/network are used.
-const telegram = require("../src/telegram");
-const attio = require("../src/attio");
+const telegram = require("../../src/sync/telegram");
+const attio = require("../../src/integrations/attio/client");
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "tellatio-sync-security-"));
 const config = { dataDir: root, syncSource: "associations", associationObjectSlug: "associations", banFolderName: "Banned", discoveryDialogLimit: 10, chatFetchTimeoutSeconds: 1 } as Config;
 const yesterday = Math.floor(Date.now() / 1000) - 86400;

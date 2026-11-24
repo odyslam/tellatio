@@ -1,9 +1,9 @@
 import { TelegramClient } from "telegram";
 import { StringSession } from "telegram/sessions";
 import { Api } from "telegram";
-import { sanitizeUntrusted } from "./guard";
+import { sanitizeUntrusted } from "../shared/guard";
 import type { Config } from "./config";
-import type { BannedTelegramUser } from "./bans";
+import type { BannedTelegramUser } from "../shared/bans";
 
 export interface TelegramMessage {
   id: number;

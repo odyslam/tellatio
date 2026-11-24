@@ -3,9 +3,9 @@ import { Api } from "telegram";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-const runtime = require("../src/cli/runtime");
-const commands = require("../src/cli/commands");
-const attio = require("../src/attio");
+const runtime = require("../../src/cli/runtime");
+const commands = require("../../src/integrations/attio/commands");
+const attio = require("../../src/integrations/attio/client");
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "tellatio-association-security-"));
 const oldDir = process.env.DATA_DIR;
 const oldWrites = process.env.TELLATIO_ALLOW_WRITES;
@@ -14,6 +14,10 @@ let stored: any[] = [];
 let existing: any = null;
 (async () => {
   process.env.DATA_DIR = root;
+  process.env.TELLATIO_ALLOW_WRITES = "0";
+  for (const name of ["cmdFoldersSyncAttio", "cmdAssociationsUpsert", "cmdAssociationsReconcile", "cmdIdentitiesUpsert", "cmdIdentitiesReconcile"]) {
+    await assert.rejects(commands[name]({}), /Refusing/);
+  }
   process.env.TELLATIO_ALLOW_WRITES = "1";
   process.env.TELLATIO_OWN_COMPANY_NAMES = "Phylax";
   const entity = new Api.Chat({ id: BigInt(123) as any, title: "Phylax <> Victim Company", photo: new Api.ChatPhotoEmpty(), participantsCount: 2, date: 1, version: 1 });

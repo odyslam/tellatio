@@ -1,16 +1,16 @@
 /**
  * One-time setup: create the required custom attributes on People in Attio.
- * Run: pnpm exec ts-node scripts/setup-attio.ts
+ * Run: pnpm exec ts-node scripts/sync/setup-attio.ts
  */
 
-import { attioRequest, attioSegment, AttioApiError } from "../src/attio-http";
-import { readSecret } from "../src/secret";
+import { attioRequest, attioSegment, AttioApiError } from "../../src/integrations/attio/http";
+import { readSecret } from "../../src/shared/secret";
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 
 // Load .env
-const envPath = path.resolve(__dirname, "..", ".env");
+const envPath = path.resolve(__dirname, "..", "..", ".env");
 try {
   const content = fs.readFileSync(envPath, "utf-8");
   for (const line of content.split("\n")) {

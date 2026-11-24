@@ -1,13 +1,13 @@
 import { formatTranscript } from "./transcript";
 import { Api } from "telegram";
 import * as telegram from "./telegram";
-import * as attio from "./attio";
-import { normalizePhone } from "./phone";
+import * as attio from "../integrations/attio/client";
+import { normalizePhone } from "../integrations/attio/phone";
 import { openState, type StateStore, type StoredMessage } from "./state";
 import { computeStrength } from "./strength";
 import type { Config } from "./config";
 import type { TelegramMessage } from "./telegram";
-import type { TelegramAssociation } from "./association";
+import type { TelegramAssociation } from "../integrations/attio/association";
 import {
   compileBanList,
   describeBannedUser,
@@ -15,7 +15,7 @@ import {
   matchBannedTelegramUser,
   parseEnvBannedUsers,
   type BanList,
-} from "./bans";
+} from "../shared/bans";
 
 function todayUTC(): string {
   return new Date().toISOString().slice(0, 10);

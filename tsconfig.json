@@ -3,7 +3,9 @@
     "target": "ES2022",
     "module": "commonjs",
     "moduleResolution": "node",
-    "lib": ["ES2022"],
+    "lib": [
+      "ES2022"
+    ],
     "outDir": "dist",
     "rootDir": "src",
     "strict": true,
@@ -16,29 +18,15 @@
     "sourceMap": true,
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true,
-    "types": ["node"]
+    "types": [
+      "node"
+    ]
   },
   "include": [
-    "src/index.ts",
-    "src/config.ts",
-    "src/secret.ts",
-    "src/proxy.ts",
-    "src/telegram.ts",
-    "src/attio.ts",
-    "src/sync.ts",
-    "src/association.ts",
-    "src/identity.ts",
-    "src/bans.ts",
-    "src/phone.ts",
-    "src/state.ts",
-    "src/db.ts",
-    "src/strength.ts",
-    "src/guard.ts",
-    "src/media.ts",
-    "src/transcript.ts",
-    "src/cli.ts",
-    "src/cli-readonly.ts",
-    "src/cli/**/*.ts"
+    "src/**/*.ts"
   ],
-  "exclude": ["node_modules", "dist"]
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
 }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import * as attio from "../src/attio";
+import * as attio from "../../src/integrations/attio/client";
 
 const originalFetch = globalThis.fetch;
 const originalBase = process.env.ATTIO_API_BASE_URL;

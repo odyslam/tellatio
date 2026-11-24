@@ -4,9 +4,9 @@
  */
 
 import assert from "node:assert/strict";
-import { canonicalCompanyName, suggestAssociation } from "../src/association";
-import { commandFlags } from "../src/cli/runtime";
-import { identityDisplayName, identityUsername } from "../src/identity";
+import { canonicalCompanyName, suggestAssociation } from "../../src/integrations/attio/association";
+import { commandFlags } from "../../src/cli/runtime";
+import { identityDisplayName, identityUsername } from "../../src/integrations/attio/identity";
 
 function withEnv(env: Record<string, string | undefined>, fn: () => void): void {
   const saved: Record<string, string | undefined> = {};

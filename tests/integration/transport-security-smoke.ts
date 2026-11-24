@@ -1,10 +1,10 @@
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import assert from "node:assert/strict";
-import { attioRequest, attioSegment, MAX_ATTIO_BYTES, ATTIO_TIMEOUT_MS } from "../src/attio-http";
-import { serialCommands } from "../src/cli/serial";
-import { runLocal, out } from "../src/cli/runtime";
-import * as attio from "../src/attio";
+import { attioRequest, attioSegment, MAX_ATTIO_BYTES, ATTIO_TIMEOUT_MS } from "../../src/integrations/attio/http";
+import { serialCommands } from "../../src/cli/serial";
+import { runLocal, out } from "../../src/cli/runtime";
+import * as attio from "../../src/integrations/attio/client";
 
 const originalFetch = globalThis.fetch;
 const originalTimeout = AbortSignal.timeout;

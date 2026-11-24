@@ -1,4 +1,4 @@
-import { requireSecret } from "./secret";
+import { requireSecret } from "../shared/secret";
 
 export interface Config {
   telegramApiId: number;

@@ -1,14 +1,14 @@
 /**
  * Smoke test for the prompt-injection / write-guard helpers.
  *
- * Imports the side-effect-free `src/guard` module (NOT the self-executing CLI)
+ * Imports the side-effect-free `src/shared/guard` module (NOT the self-executing CLI)
  * so it can run without Telegram credentials. Runs clean under both:
- *   npx ts-node scripts/guard-smoke.ts
- *   bun scripts/guard-smoke.ts
+ *   npx ts-node tests/shared/guard-smoke.ts
+ *   bun tests/shared/guard-smoke.ts
  */
 
 import assert from "node:assert/strict";
-import { evaluateWriteGuard, sanitizeUntrusted, sanitizeUntrustedValue } from "../src/guard";
+import { evaluateWriteGuard, sanitizeUntrusted, sanitizeUntrustedValue } from "../../src/shared/guard";
 
 function withEnv(env: Record<string, string | undefined>, fn: () => void): void {
   const saved: Record<string, string | undefined> = {};

@@ -1,5 +1,5 @@
 import type { StoredMessage } from "./state";
-import { sanitizeUntrusted, UNTRUSTED_ADVISORY } from "./guard";
+import { sanitizeUntrusted, UNTRUSTED_ADVISORY } from "../shared/guard";
 
 // Escape HTML and Markdown metacharacters so remote content cannot forge headings,
 // links, embedded images, or transcript boundaries in the CRM note.

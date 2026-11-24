@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-const runtime = require("../src/cli/runtime");
-const commands = require("../src/cli/commands");
+const runtime = require("../../src/cli/runtime");
+const commands = require("../../src/cli/commands");
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "tellatio-cli-security-"));
 let networkCalls = 0;
 let sent = false;
@@ -27,9 +27,6 @@ let sent = false;
   };
   await assert.rejects(commands.cmdMediaDownload(["fixture", "1", "ok.txt"]), /Refusing/);
   await assert.rejects(commands.cmdMediaSend(["fixture", "ok.txt"], {}), /Refusing/);
-  for (const name of ["cmdFoldersSyncAttio", "cmdAssociationsUpsert", "cmdAssociationsReconcile", "cmdIdentitiesUpsert", "cmdIdentitiesReconcile"]) {
-    await assert.rejects(commands[name]({}), /Refusing/);
-  }
   assert.equal(networkCalls, 0);
   process.env.TELLATIO_ALLOW_WRITES = "1";
   await assert.rejects(commands.cmdMediaDownload(["fixture", "1", "../outside"]), /not a path/);
@@ -45,5 +42,5 @@ let sent = false;
   };
   await assert.rejects(commands.cmdMediaDownload(["fixture", "1", "partial.txt"]), /download failed/);
   assert.equal(fs.existsSync(path.join(root, "downloads", "partial.txt")), false);
-  console.log("cli-security-smoke: PASS (guarded media/CRM, confined transfers, no overwrite, cleanup, buffered upload)");
+  console.log("cli-security-smoke: PASS (guarded media, confined transfers, no overwrite, cleanup, buffered upload)");
 })().catch(err => { console.error(err); process.exitCode = 1; }).finally(() => fs.rmSync(root, { recursive: true, force: true }));

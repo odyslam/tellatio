@@ -1,87 +1,76 @@
 import { Cli, z } from "incur";
-import { installProxyFromEnv } from "../proxy";
-import { UNTRUSTED_ADVISORY } from "../guard";
+import { associations, attioDoctorCommand, discover, identities, syncAttioFolderCommand } from "../integrations/attio/registry";
+import { UNTRUSTED_ADVISORY } from "../shared/guard";
+import { installProxyFromEnv } from "../shared/proxy";
+import {
+  cmdBansAdd,
+  cmdBansCheck,
+  cmdBansList,
+  cmdBansRemove,
+  cmdChatsActivity,
+  cmdChatsFolder,
+  cmdChatsInfo,
+  cmdChatsList,
+  cmdChatsResolve,
+  cmdChatsSearch,
+  cmdChatsStatus,
+  cmdChatsUnread,
+  cmdContactsAdd,
+  cmdContactsBlock,
+  cmdContactsDelete,
+  cmdContactsList,
+  cmdContactsUnblock,
+  cmdDraftClear,
+  cmdDraftSet,
+  cmdFoldersAdd,
+  cmdFoldersCreate,
+  cmdFoldersDelete,
+  cmdFoldersExcludeAdd,
+  cmdFoldersExcludeRemove,
+  cmdFoldersInfo,
+  cmdFoldersList,
+  cmdFoldersPin,
+  cmdFoldersRemove,
+  cmdFoldersRename,
+  cmdFoldersReorder,
+  cmdFoldersSources,
+  cmdFoldersUnpin,
+  cmdFoldersUpdate,
+  cmdGroupAdd,
+  cmdGroupCreate,
+  cmdGroupDescription,
+  cmdGroupInfo,
+  cmdGroupKick,
+  cmdGroupLeave,
+  cmdGroupMembers,
+  cmdGroupTitle,
+  cmdMe,
+  cmdMediaDownload,
+  cmdMediaSend,
+  cmdMsgDelete,
+  cmdMsgEdit,
+  cmdMsgForward,
+  cmdMsgMarkRead,
+  cmdMsgPin,
+  cmdMsgRead,
+  cmdMsgSchedule,
+  cmdMsgScheduleDelete,
+  cmdMsgScheduleList,
+  cmdMsgSearch,
+  cmdMsgSend,
+  cmdMsgUnpin,
+  cmdProfileSetBio,
+  cmdProfileSetName,
+  cmdProfileSetUsername,
+} from "./commands";
 import {
   commandFlags,
   csv,
   loadEnv,
-  runAttio,
-  runLocal,
   runTelegram,
-  runTelegramAndAttio,
   runTelegramMaybeWrite,
   runTelegramWrite
 } from "./runtime";
-import {
-  cmdMe,
-  cmdChatsList,
-  cmdChatsSearch,
-  cmdChatsInfo,
-  cmdChatsResolve,
-  cmdChatsFolder,
-  cmdChatsUnread,
-  cmdChatsActivity,
-  cmdChatsStatus,
-  cmdFoldersList,
-  cmdFoldersCreate,
-  cmdFoldersRename,
-  cmdFoldersDelete,
-  cmdFoldersAdd,
-  cmdFoldersRemove,
-  cmdFoldersPin,
-  cmdFoldersUnpin,
-  cmdFoldersExcludeAdd,
-  cmdFoldersExcludeRemove,
-  cmdFoldersSources,
-  cmdFoldersReorder,
-  cmdFoldersSyncAttio,
-  cmdDiscoverAssociations,
-  cmdAssociationsUpsert,
-  cmdAssociationsReconcile,
-  cmdAssociationsStatus,
-  cmdAssociationsCompanyCandidates,
-  cmdIdentitiesReconcile,
-  cmdIdentitiesCandidates,
-  cmdIdentitiesUpsert,
-  cmdIdentitiesStatus,
-  cmdBansList,
-  cmdBansAdd,
-  cmdBansRemove,
-  cmdBansCheck,
-  cmdMsgRead,
-  cmdMsgSend,
-  cmdMsgEdit,
-  cmdMsgDelete,
-  cmdMsgForward,
-  cmdMsgSearch,
-  cmdMsgPin,
-  cmdMsgUnpin,
-  cmdMsgSchedule,
-  cmdMsgScheduleList,
-  cmdMsgScheduleDelete,
-  cmdMsgMarkRead,
-  cmdContactsList,
-  cmdContactsAdd,
-  cmdContactsDelete,
-  cmdContactsBlock,
-  cmdContactsUnblock,
-  cmdGroupCreate,
-  cmdGroupInfo,
-  cmdGroupMembers,
-  cmdGroupAdd,
-  cmdGroupKick,
-  cmdGroupTitle,
-  cmdGroupLeave,
-  cmdGroupDescription,
-  cmdMediaSend,
-  cmdMediaDownload,
-  cmdProfileSetBio,
-  cmdProfileSetName,
-  cmdProfileSetUsername,
-  cmdDraftSet,
-  cmdDraftClear,
-  cmdDoctor
-} from "./commands";
 
 // ── incur CLI ───────────────────────────────────────────────────
 
@@ -94,6 +83,18 @@ const chats = Cli.create("chats", { description: "Inspect Telegram chats and fol
       omitLastMessageText: z.boolean().default(false).describe("Omit last message text for metadata-only review"),
     }),
     run: (c) => runTelegram(() => cmdChatsList(commandFlags(c.options))),
+  })
+  .command("list-meta", {
+    description: "List recent chats without message text for metadata-only review",
+    options: z.object({
+      limit: z.number().default(50).describe("Maximum chats to return"),
+      since: z.string().optional().describe("Only include chats with last message since this filter (e.g. 3d, 12h, today)"),
+    }),
+    run: (c) => runTelegram(() => cmdChatsList(commandFlags({
+      limit: c.options.limit,
+      since: c.options.since,
+      "omit-last-message-text": true,
+    }))),
   })
   .command("search", {
     description: "Search chats, users, groups, and channels",
@@ -125,6 +126,18 @@ const chats = Cli.create("chats", { description: "Inspect Telegram chats and fol
     }),
     run: (c) => runTelegram(() => cmdChatsUnread(commandFlags(c.options))),
   })
+  .command("unread-meta", {
+    description: "List unread chats without message text for metadata-only review",
+    options: z.object({
+      limit: z.number().default(50).describe("Maximum chats to scan"),
+      since: z.string().optional().describe("Only include chats with last message since this filter (e.g. 3d, 12h, today)"),
+    }),
+    run: (c) => runTelegram(() => cmdChatsUnread(commandFlags({
+      limit: c.options.limit,
+      since: c.options.since,
+      "omit-last-message-text": true,
+    }))),
+  })
   .command("activity", {
     description: "Summarize recent activity for a folder",
     args: z.object({ folder: z.string().describe("Folder name") }),
@@ -137,10 +150,27 @@ const chats = Cli.create("chats", { description: "Inspect Telegram chats and fol
     run: (c) => runTelegram(() => cmdChatsStatus([c.args.user])),
   });
 
-const folders = Cli.create("folders", { description: "Inspect and manage Telegram folders" })
+const folderSelector = z.string().describe("Folder name or #ID from folders list (quote #ID in the shell)");
+const folderSourceOptions = {
+  contacts: z.string().optional().describe("true/false"),
+  nonContacts: z.string().optional().describe("true/false"),
+  groups: z.string().optional().describe("true/false"),
+  channels: z.string().optional().describe("true/false"),
+  bots: z.string().optional().describe("true/false"),
+  excludeMuted: z.string().optional().describe("true/false"),
+  excludeRead: z.string().optional().describe("true/false"),
+  excludeArchived: z.string().optional().describe("true/false"),
+};
+
+const folders = Cli.create("folders", { description: "Manage folders: create/delete folders, add/remove chats, and edit settings" })
   .command("list", {
     description: "List all folders",
     run: () => runTelegram(cmdFoldersList),
+  })
+  .command("info", {
+    description: "Show folder settings and explicit included, pinned, and excluded peer IDs",
+    args: z.object({ folder: folderSelector }),
+    run: (c) => runTelegram(() => cmdFoldersInfo([c.args.folder])),
   })
   .command("create", {
     description: "Create a Telegram folder",
@@ -156,39 +186,53 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
       excludeRead: z.boolean().default(false).describe("Exclude read chats"),
       excludeArchived: z.boolean().default(false).describe("Exclude archived chats"),
       emoticon: z.string().optional().describe("Folder emoji"),
-      color: z.number().optional().describe("Telegram folder color ID"),
+      color: z.number().int().min(-1).max(6).optional().describe("Folder tag color (-1 to 6; Telegram account restrictions apply)"),
       dryRun: z.boolean().default(false).describe("Preview without changing Telegram"),
     }),
     run: (c) => runTelegramMaybeWrite("create folder", !c.options.dryRun, () => cmdFoldersCreate([c.args.name], commandFlags(c.options))),
   })
+  .command("update", {
+    description: "Edit folder settings; omitted settings and chat membership are preserved",
+    args: z.object({ folder: folderSelector }),
+    options: z.object({
+      name: z.string().optional().describe("New folder name (1–12 characters)"),
+      emoticon: z.string().optional().describe("Folder emoji"),
+      clearEmoticon: z.boolean().default(false).describe("Remove the custom folder emoji"),
+      color: z.number().int().min(-1).max(6).optional().describe("Folder tag color (-1 to 6; Telegram account restrictions apply)"),
+      clearColor: z.boolean().default(false).describe("Remove the folder tag color setting"),
+      ...folderSourceOptions,
+      dryRun: z.boolean().default(false).describe("Preview without changing Telegram"),
+    }),
+    run: (c) => runTelegramMaybeWrite("update folder", !c.options.dryRun, () => cmdFoldersUpdate([c.args.folder], commandFlags(c.options))),
+  })
   .command("rename", {
     description: "Rename a Telegram folder",
     args: z.object({
-      from: z.string().describe("Current folder name"),
+      from: folderSelector,
       to: z.string().describe("New folder name"),
     }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
     run: (c) => runTelegramMaybeWrite("rename folder", !c.options.dryRun, () => cmdFoldersRename([c.args.from, c.args.to, c.options.dryRun ? "dry-run" : ""])),
   })
   .command("delete", {
-    description: "Delete a Telegram folder",
-    args: z.object({ name: z.string().describe("Folder name") }),
+    description: "Delete a folder without deleting its chats or leaving groups",
+    args: z.object({ name: folderSelector }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
     run: (c) => runTelegramMaybeWrite("delete folder", !c.options.dryRun, () => cmdFoldersDelete([c.args.name, c.options.dryRun ? "dry-run" : ""])),
   })
   .command("add", {
     description: "Add chats to a Telegram folder",
     args: z.object({
-      folder: z.string().describe("Folder name"),
+      folder: folderSelector,
       chat: z.string().describe("Chat identifier, or comma-separated chat identifiers"),
     }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
     run: (c) => runTelegramMaybeWrite("add chats to folder", !c.options.dryRun, () => cmdFoldersAdd([c.args.folder, c.args.chat, c.options.dryRun ? "dry-run" : ""])),
   })
   .command("remove", {
-    description: "Remove chats from a Telegram folder",
+    description: "Remove chats; source-based folders also explicitly exclude them",
     args: z.object({
-      folder: z.string().describe("Folder name"),
+      folder: folderSelector,
       chat: z.string().describe("Chat identifier, or comma-separated chat identifiers"),
     }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
@@ -197,7 +241,7 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
   .command("pin", {
     description: "Pin chats inside a Telegram folder",
     args: z.object({
-      folder: z.string().describe("Folder name"),
+      folder: folderSelector,
       chat: z.string().describe("Chat identifier, or comma-separated chat identifiers"),
     }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
@@ -206,7 +250,7 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
   .command("unpin", {
     description: "Unpin chats inside a Telegram folder",
     args: z.object({
-      folder: z.string().describe("Folder name"),
+      folder: folderSelector,
       chat: z.string().describe("Chat identifier, or comma-separated chat identifiers"),
     }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
@@ -215,7 +259,7 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
   .command("exclude-add", {
     description: "Explicitly exclude chats from a source-based Telegram folder",
     args: z.object({
-      folder: z.string().describe("Folder name"),
+      folder: folderSelector,
       chat: z.string().describe("Chat identifier, or comma-separated chat identifiers"),
     }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
@@ -224,7 +268,7 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
   .command("exclude-remove", {
     description: "Remove chats from a folder's explicit exclusions",
     args: z.object({
-      folder: z.string().describe("Folder name"),
+      folder: folderSelector,
       chat: z.string().describe("Chat identifier, or comma-separated chat identifiers"),
     }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
@@ -232,16 +276,9 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
   })
   .command("sources", {
     description: "Edit built-in folder sources and exclusions",
-    args: z.object({ folder: z.string().describe("Folder name") }),
+    args: z.object({ folder: folderSelector }),
     options: z.object({
-      contacts: z.string().optional().describe("true/false"),
-      nonContacts: z.string().optional().describe("true/false"),
-      groups: z.string().optional().describe("true/false"),
-      channels: z.string().optional().describe("true/false"),
-      bots: z.string().optional().describe("true/false"),
-      excludeMuted: z.string().optional().describe("true/false"),
-      excludeRead: z.string().optional().describe("true/false"),
-      excludeArchived: z.string().optional().describe("true/false"),
+      ...folderSourceOptions,
       dryRun: z.boolean().default(false).describe("Preview without changing Telegram"),
     }),
     run: (c) => runTelegramMaybeWrite("edit folder sources", !c.options.dryRun, () => cmdFoldersSources([c.args.folder], commandFlags({
@@ -257,219 +294,13 @@ const folders = Cli.create("folders", { description: "Inspect and manage Telegra
     }))),
   })
   .command("reorder", {
-    description: "Move named folders to the front in the given order",
-    args: z.object({ order: z.string().describe("Comma-separated folder names in desired leading order") }),
+    description: "Reorder named folders while preserving the All Chats tab's position",
+    args: z.object({ order: z.string().describe("Comma-separated folder names or #IDs in desired leading order") }),
     options: z.object({ dryRun: z.boolean().default(false).describe("Preview without changing Telegram") }),
     run: (c) => runTelegramMaybeWrite("reorder folders", !c.options.dryRun, () => cmdFoldersReorder([c.args.order], commandFlags({ "dry-run": c.options.dryRun }))),
   })
-  .command("sync-attio", {
-    description: "Add approved Telegram Association chats to the Attio review folder",
-    options: z.object({
-      folder: z.string().default("Attio").describe("Telegram folder to receive approved association chats"),
-      object: z.string().default("telegram_associations").describe("Attio association object slug"),
-      includePeople: z.boolean().default(true).describe("Include approved person/DM associations"),
-      dryRun: z.boolean().default(false).describe("Preview without changing Telegram"),
-    }),
-    run: (c) => runTelegramAndAttio(() => cmdFoldersSyncAttio(commandFlags({
-      folder: c.options.folder,
-      object: c.options.object,
-      "include-people": c.options.includePeople,
-      "dry-run": c.options.dryRun,
-    }))),
-  });
+  .command("sync-attio", syncAttioFolderCommand);
 
-const discover = Cli.create("discover", { description: "Find likely Telegram to Attio associations" })
-  .command("associations", {
-    description: "Dry-run recent chats and propose CRM association candidates",
-    options: z.object({
-      limit: z.number().default(100).describe("Maximum recent dialogs to inspect"),
-      since: z.string().default("3d").describe("Time filter: today, yesterday, Nd, Nh, Nm, or YYYY-MM-DD"),
-      includeIgnored: z.boolean().default(false).describe("Include low-confidence ignored candidates"),
-      onlyChats: z.string().optional().describe("Comma-separated Telegram canonical chat IDs to restrict scanning"),
-    }),
-    run: (c) => runTelegram(() => cmdDiscoverAssociations(commandFlags({
-      limit: c.options.limit,
-      since: c.options.since,
-      "include-ignored": c.options.includeIgnored,
-      "only-chats": c.options.onlyChats,
-    }))),
-  });
-
-const associations = Cli.create("associations", { description: "Manage Attio Telegram association records" })
-  .command("status", {
-    description: "List Telegram Association records with counts by status",
-    options: z.object({
-      object: z.string().default("telegram_associations").describe("Attio association object slug"),
-      limit: z.number().default(500).describe("Maximum association records to inspect"),
-    }),
-    run: (c) => runAttio(() => cmdAssociationsStatus(commandFlags({
-      object: c.options.object,
-      limit: c.options.limit,
-    }))),
-  })
-  .command("company-candidates", {
-    description: "Search Attio Company candidates by name (for association approval)",
-    options: z.object({
-      name: z.string().describe("Company name search"),
-    }),
-    run: (c) => runAttio(() => cmdAssociationsCompanyCandidates(commandFlags({
-      name: c.options.name,
-    }))),
-  })
-  .command("upsert", {
-    description: "Create or update a Telegram Association record in Attio",
-    options: z.object({
-      object: z.string().default("telegram_associations").describe("Attio association object slug"),
-      chatId: z.string().describe("Telegram chat ID from discover associations"),
-      title: z.string().describe("Telegram chat title"),
-      type: z.string().default("unknown").describe("dm, group, supergroup, channel, or unknown"),
-      targetObject: z.string().describe("Attio target object slug, for example people or companies"),
-      targetName: z.string().optional().describe("Human-readable inferred target name"),
-      targetRecordId: z.string().default("").describe("Attio target record ID; required before approval"),
-      status: z.string().default("suggested").describe("suggested, approved, ignored, or needs_review"),
-      confidence: z.number().default(0).describe("Confidence from 0 to 1"),
-      reason: z.string().default("").describe("Short rationale for the association"),
-      syncMode: z.string().default("transcript").describe("transcript, summary, or stats"),
-      dryRun: z.boolean().default(false).describe("Preview without writing to Attio"),
-    }),
-    run: (c) => runAttio(() => cmdAssociationsUpsert(commandFlags({
-      object: c.options.object,
-      "chat-id": c.options.chatId,
-      title: c.options.title,
-      type: c.options.type,
-      "target-object": c.options.targetObject,
-      "target-name": c.options.targetName,
-      "target-record-id": c.options.targetRecordId,
-      status: c.options.status,
-      confidence: c.options.confidence,
-      reason: c.options.reason,
-      "sync-mode": c.options.syncMode,
-      "dry-run": c.options.dryRun,
-    }))),
-  })
-  .command("reconcile", {
-    description: "Discover chats and propose Attio company destinations for explicit approval",
-    options: z.object({
-      object: z.string().default("telegram_associations").describe("Attio association object slug"),
-      identityObject: z.string().default("telegram_identities").describe("Attio identity object slug"),
-      limit: z.number().default(100).describe("Maximum recent dialogs to inspect"),
-      since: z.string().default("3d").describe("Time filter: today, yesterday, Nd, Nh, Nm, or YYYY-MM-DD"),
-      minConfidence: z.number().default(0.45).describe("Minimum confidence required to upsert a candidate"),
-      includeIdentityEvidence: z.boolean().default(true).describe("Use approved Telegram identities and Person email domains as group company evidence"),
-      identityParticipantLimit: z.number().default(30).describe("Maximum recent senders or fallback participants to inspect for identity evidence"),
-      includeProfileDescriptions: z.boolean().default(true).describe("Use Telegram profile descriptions/bios from group participants as company signals"),
-      profileParticipantLimit: z.number().default(30).describe("Maximum group participants to inspect for profile company hints"),
-      companyLimit: z.number().default(500).describe("Maximum Attio companies to load for profile hint matching"),
-      onlyChats: z.string().optional().describe("Comma-separated Telegram canonical chat IDs to restrict scanning"),
-      dryRun: z.boolean().default(false).describe("Preview without writing association records"),
-    }),
-    run: (c) => runTelegramAndAttio(() => cmdAssociationsReconcile(commandFlags({
-      object: c.options.object,
-      "identity-object": c.options.identityObject,
-      limit: c.options.limit,
-      since: c.options.since,
-      "min-confidence": c.options.minConfidence,
-      "include-identity-evidence": c.options.includeIdentityEvidence,
-      "identity-participant-limit": c.options.identityParticipantLimit,
-      "include-profile-descriptions": c.options.includeProfileDescriptions,
-      "profile-participant-limit": c.options.profileParticipantLimit,
-      "company-limit": c.options.companyLimit,
-      "only-chats": c.options.onlyChats,
-      "dry-run": c.options.dryRun,
-    }))),
-  });
-
-const identities = Cli.create("identities", { description: "Resolve Telegram users to existing Attio People" })
-  .command("status", {
-    description: "List Telegram Identity records with counts by status",
-    options: z.object({
-      identityObject: z.string().default("telegram_identities").describe("Attio identity object slug"),
-      limit: z.number().default(500).describe("Maximum identity records to inspect"),
-    }),
-    run: (c) => runAttio(() => cmdIdentitiesStatus(commandFlags({
-      "identity-object": c.options.identityObject,
-      limit: c.options.limit,
-    }))),
-  })
-  .command("reconcile", {
-    description: "Scan Telegram identities; approve only stable ID matches and propose profile matches for review",
-    options: z.object({
-      object: z.string().default("telegram_associations").describe("Attio chat association object slug"),
-      identityObject: z.string().default("telegram_identities").describe("Attio identity object slug"),
-      limit: z.number().default(100).describe("Maximum recent dialogs to inspect"),
-      since: z.string().default("3d").describe("Time filter: today, yesterday, Nd, Nh, Nm, or YYYY-MM-DD"),
-      includeParticipants: z.boolean().default(true).describe("Include participants from approved group chats"),
-      includeExplicitGroups: z.boolean().default(false).describe("Also include participants from explicit --only-chats group IDs that do not yet have approved associations"),
-      includeProfileDescriptions: z.boolean().default(true).describe("Fetch Telegram profile descriptions/bios and infer company hints"),
-      groupTitleCompanyHints: z.boolean().default(true).describe("Use explicit group titles as company hints when scanning unassociated groups"),
-      participantLimit: z.number().default(50).describe("Maximum recent senders or fallback participants per approved group"),
-      companyLimit: z.number().default(500).describe("Maximum Attio companies to load for profile hint matching"),
-      onlyChats: z.string().optional().describe("Comma-separated Telegram canonical chat IDs to restrict scanning"),
-      dryRun: z.boolean().default(false).describe("Preview without writing identity records or People updates"),
-    }),
-    run: (c) => runTelegramAndAttio(() => cmdIdentitiesReconcile(commandFlags({
-      object: c.options.object,
-      "identity-object": c.options.identityObject,
-      limit: c.options.limit,
-      since: c.options.since,
-      "include-participants": c.options.includeParticipants,
-      "include-explicit-groups": c.options.includeExplicitGroups,
-      "include-profile-descriptions": c.options.includeProfileDescriptions,
-      "group-title-company-hints": c.options.groupTitleCompanyHints,
-      "participant-limit": c.options.participantLimit,
-      "company-limit": c.options.companyLimit,
-      "only-chats": c.options.onlyChats,
-      "dry-run": c.options.dryRun,
-    }))),
-  })
-  .command("candidates", {
-    description: "Search Attio People candidates for a Telegram identity",
-    options: z.object({
-      name: z.string().optional().describe("Person name search"),
-      username: z.string().optional().describe("Telegram username search"),
-      phone: z.string().optional().describe("Phone number search"),
-      telegramUserId: z.string().optional().describe("Telegram user ID search"),
-    }),
-    run: (c) => runAttio(() => cmdIdentitiesCandidates(commandFlags({
-      name: c.options.name,
-      username: c.options.username,
-      phone: c.options.phone,
-      "telegram-user-id": c.options.telegramUserId,
-    }))),
-  })
-  .command("upsert", {
-    description: "Create or update a manual Telegram user to Attio Person mapping",
-    options: z.object({
-      identityObject: z.string().default("telegram_identities").describe("Attio identity object slug"),
-      telegramUserId: z.string().describe("Stable Telegram user ID"),
-      telegramUsername: z.string().optional().describe("Telegram username"),
-      displayName: z.string().describe("Telegram display name"),
-      telegramBio: z.string().optional().describe("Telegram profile description/bio"),
-      companyHints: z.string().optional().describe("Comma-separated company hints from group context or Telegram bio"),
-      phone: z.string().optional().describe("Phone number"),
-      targetRecordId: z.string().default("").describe("Attio Person record ID"),
-      targetName: z.string().optional().describe("Human-readable target name"),
-      status: z.string().default("approved").describe("suggested, approved, ignored, or needs_review"),
-      confidence: z.number().optional().describe("Confidence from 0 to 1"),
-      reason: z.string().default("manual identity mapping").describe("Short mapping rationale"),
-      dryRun: z.boolean().default(false).describe("Preview without writing to Attio"),
-    }),
-    run: (c) => runAttio(() => cmdIdentitiesUpsert(commandFlags({
-      "identity-object": c.options.identityObject,
-      "telegram-user-id": c.options.telegramUserId,
-      "telegram-username": c.options.telegramUsername,
-      "display-name": c.options.displayName,
-      "telegram-bio": c.options.telegramBio,
-      "company-hints": c.options.companyHints,
-      phone: c.options.phone,
-      "target-record-id": c.options.targetRecordId,
-      "target-name": c.options.targetName,
-      status: c.options.status,
-      confidence: c.options.confidence,
-      reason: c.options.reason,
-      "dry-run": c.options.dryRun,
-    }))),
-  });
 
 const bans = Cli.create("bans", { description: "Manage the Telegram folder-backed ban list" })
   .command("list", {
@@ -792,21 +623,7 @@ const cli = Cli.create("tellatio", {
     description: "Get your profile info",
     run: () => runTelegram(cmdMe),
   })
-  .command("doctor", {
-    description: "Check Telegram, Attio, Railway, and local sync state",
-    options: z.object({
-      skipTelegram: z.boolean().default(false).describe("Skip Telegram session and folder checks"),
-      skipAttio: z.boolean().default(false).describe("Skip Attio association and identity checks"),
-      skipRailway: z.boolean().default(false).describe("Skip Railway service status checks"),
-      limit: z.number().default(100).describe("Maximum Attio records to inspect for counts"),
-    }),
-    run: (c) => runLocal(() => cmdDoctor(commandFlags({
-      "skip-telegram": c.options.skipTelegram,
-      "skip-attio": c.options.skipAttio,
-      "skip-railway": c.options.skipRailway,
-      limit: c.options.limit,
-    }))),
-  })
+  .command("doctor", attioDoctorCommand)
   .command(chats)
   .command(folders)
   .command(discover)

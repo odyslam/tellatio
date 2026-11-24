@@ -2,7 +2,7 @@
  * Minimal synchronous SQLite driver shim.
  *
  * tellatio runs in two runtimes: the worker is compiled and run under Node
- * (`node dist/index.js`), while the CLI is executed under Bun (`bun src/cli.ts`).
+ * (`node dist/sync/main.js`), while the CLI is executed under Bun (`bun src/cli.ts`).
  * `better-sqlite3` is a native Node addon that Bun does not support
  * (https://github.com/oven-sh/bun/issues/4290), and `bun:sqlite` only exists under
  * Bun. This shim exposes a single synchronous interface backed by `better-sqlite3`

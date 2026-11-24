@@ -3,7 +3,7 @@
 import { Cli, z } from "incur";
 import { runTelegram, commandFlags, loadEnv } from "./cli/runtime";
 import { cmdMe, cmdChatsList, cmdChatsInfo, cmdMsgRead, cmdMsgSearch } from "./cli/commands";
-import { UNTRUSTED_ADVISORY } from "./guard";
+import { UNTRUSTED_ADVISORY } from "./shared/guard";
 
 process.umask(0o077);
 loadEnv();

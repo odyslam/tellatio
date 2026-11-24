@@ -1,6 +1,6 @@
 {
   "name": "tellatio",
-  "description": "Telegram \u2192 Attio sync service",
+  "description": "Telegram CLI for terminal workflows and AI agents",
   "private": true,
   "version": "0.1.0",
   "bin": {
@@ -11,13 +11,19 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "lint": "pnpm typecheck",
-    "test": "ts-node scripts/guard-smoke.ts && ts-node scripts/cli-logic-smoke.ts && ts-node scripts/secret-smoke.ts && ts-node scripts/state-smoke.ts && ts-node scripts/security-smoke.ts && ts-node scripts/sync-security-smoke.ts && ts-node scripts/cli-security-smoke.ts && ts-node scripts/transport-security-smoke.ts && ts-node scripts/identity-security-smoke.ts && ts-node scripts/association-security-smoke.ts",
-    "dev": "ts-node src/index.ts",
-    "start": "node dist/index.js",
+    "test": "pnpm test:cli && pnpm test:sync",
+    "dev": "bun src/cli.ts",
+    "start": "node dist/cli.js",
     "login:telegram": "node scripts/telegram-login.js",
     "login:telegram:qr": "node scripts/telegram-login.js --qr",
     "tellatio": "bin/tellatio",
-    "test:readonly": "node scripts/readonly-mcp-smoke.js"
+    "test:readonly": "node tests/cli/readonly-mcp-smoke.js",
+    "test:cli": "ts-node tests/shared/guard-smoke.ts && ts-node tests/shared/secret-smoke.ts && ts-node tests/cli/folders-smoke.ts && ts-node tests/cli/cli-security-smoke.ts",
+    "test:sync": "ts-node tests/attio/cli-logic-smoke.ts && ts-node tests/sync/state-smoke.ts && ts-node tests/sync/sync-security-smoke.ts && ts-node tests/attio/identity-security-smoke.ts && ts-node tests/attio/association-security-smoke.ts && ts-node tests/integration/security-smoke.ts && ts-node tests/integration/transport-security-smoke.ts",
+    "sync:dev": "ts-node src/sync/main.ts",
+    "sync:start": "node dist/sync/main.js",
+    "sync:once": "ts-node scripts/sync/sync-once.ts",
+    "attio:setup": "ts-node scripts/sync/setup-attio.ts"
   },
   "devDependencies": {
     "@types/better-sqlite3": "7.6.13",
@@ -27,8 +33,8 @@
     "typescript": "5.9.3"
   },
   "dependencies": {
-    "better-sqlite3": "11.10.0",
-    "incur": "0.4.5",
+    "better-sqlite3": "13.0.3",
+    "incur": "0.5.1",
     "qrcode-terminal": "0.12.0",
     "telegram": "2.26.22",
     "undici": "8.12.3"

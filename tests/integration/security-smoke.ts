@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { createDownload, readUpload, MAX_MEDIA_BYTES } from "../src/media";
-import { formatTranscript } from "../src/transcript";
-import { evaluateWriteGuard, sanitizeUntrusted } from "../src/guard";
+import { createDownload, readUpload, MAX_MEDIA_BYTES } from "../../src/cli/media";
+import { formatTranscript } from "../../src/sync/transcript";
+import { evaluateWriteGuard, sanitizeUntrusted } from "../../src/shared/guard";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "tellatio-security-"));
 try {

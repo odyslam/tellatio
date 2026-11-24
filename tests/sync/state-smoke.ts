@@ -2,14 +2,14 @@
  * Runtime-agnostic verification for the SQLite state store and the one-time
  * legacy-JSON migration. Exercises the real code path with no Telegram/Attio access.
  *
- * Run under Node (better-sqlite3):  npx ts-node scripts/state-smoke.ts
- * Run under Bun  (bun:sqlite):      bun scripts/state-smoke.ts
+ * Run under Node (better-sqlite3):  npx ts-node tests/sync/state-smoke.ts
+ * Run under Bun  (bun:sqlite):      bun tests/sync/state-smoke.ts
  */
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { openState } from "../src/state";
+import { openState } from "../../src/sync/state";
 
 const runtime =
   typeof (globalThis as { Bun?: unknown }).Bun !== "undefined" ? "bun (bun:sqlite)" : "node (better-sqlite3)";

@@ -9,6 +9,7 @@ RUN pnpm install --frozen-lockfile
 COPY tsconfig.json ./
 COPY src/ ./src/
 COPY scripts/ ./scripts/
+COPY tests/ ./tests/
 RUN pnpm test && pnpm build && pnpm test:readonly && pnpm prune --prod
 
 FROM node:22-slim
@@ -19,7 +20,7 @@ WORKDIR /app
 COPY --chmod=644 --from=build /app/package.json ./
 COPY --from=build /app/node_modules ./node_modules/
 COPY --from=build /app/dist ./dist/
-COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint
+COPY --chmod=755 deploy/sync/docker-entrypoint.sh /usr/local/bin/docker-entrypoint
 RUN mkdir -p /data && chmod 700 /data && chown node:node /data
 ENTRYPOINT ["docker-entrypoint"]
-CMD ["node", "dist/index.js"]
+CMD ["node", "dist/sync/main.js"]

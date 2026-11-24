@@ -2,7 +2,7 @@
 #
 # This is a REFERENCE example, not a turnkey deployment. You must:
 #   - Pin the real iron-proxy image/tag (see the `iron` service comment).
-#   - Provide real secret files under ./secrets/ (gitignored).
+#   - Provide real secret files under ../../secrets/ (gitignored).
 #   - Review iron.policy.yaml against https://docs.iron.sh before going live.
 #
 # The worker's HTTP egress (Attio) is forced through iron via HTTPS_PROXY.
@@ -24,8 +24,8 @@ services:
 
   worker:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ../..
+      dockerfile: deploy/sync/Dockerfile
     restart: unless-stopped
     depends_on:
       - iron
@@ -60,12 +60,12 @@ services:
       - tellatio_data:/data
 
 secrets:
-  # File-based secrets. These ./secrets/*.txt paths are gitignored examples -
+  # File-based secrets. These ../../secrets/*.txt paths are gitignored examples -
   # replace with your real secret files (or wire up your orchestrator's secrets).
   attio_api_key:
-    file: ./secrets/attio_api_key.txt
+    file: ../../secrets/attio_api_key.txt
   telegram_session:
-    file: ./secrets/telegram_session.txt
+    file: ../../secrets/telegram_session.txt
 
 volumes:
   tellatio_data:

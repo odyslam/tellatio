@@ -1,16 +1,8 @@
-import { serialCommands } from "./serial";
 import * as fs from "node:fs";
-import { readSecret } from "../secret";
 import * as path from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import { TelegramClient } from "telegram";
+import { Api, TelegramClient } from "telegram";
 import { Logger, LogLevel } from "telegram/extensions/Logger";
 import { StringSession } from "telegram/sessions";
-import { Api } from "telegram";
-import { normalizeAssociationName } from "../association";
-import * as attio from "../attio";
-import { openState, type StateStore, type RunState } from "../state";
 import {
   compileBanList,
   describeBannedUser,
@@ -20,14 +12,22 @@ import {
   parseEnvBannedUsers,
   type BanList,
   type BannedTelegramUser,
-} from "../bans";
-import { evaluateWriteGuard, sanitizeUntrusted, sanitizeUntrustedValue } from "../guard";
-
-const execFileAsync = promisify(execFile);
+} from "../shared/bans";
+import { evaluateWriteGuard, sanitizeUntrusted, sanitizeUntrustedValue } from "../shared/guard";
+import { readSecret } from "../shared/secret";
+import { serialCommands } from "./serial";
 
 process.on("unhandledRejection", (reason) => {
   if (reason instanceof Error && reason.message === "TIMEOUT") return;
-  throw reason;
+  // Background rejections after the primary command has already flushed its
+  // JSON payload used to be re-thrown, which surfaced a non-zero exit code
+  // even on successful commands. Downstream shell wrappers (bd-pulse.sh) then
+  // marked otherwise-valid runs as failed. Log the diagnostic instead so the
+  // exit code reflects the actual command outcome.
+  const msg = reason instanceof Error ? (reason.stack || reason.message) : String(reason);
+  try {
+    process.stderr.write(`[tellatio] background rejection ignored: ${msg}\n`);
+  } catch {}
 });
 
 // ─── Env & Config ───────────────────────────────────────────────
@@ -102,32 +102,6 @@ async function runTelegramMaybeWrite(operation: string, shouldGuard: boolean, fn
   return runTelegram(fn);
 }
 
-async function runAttio(operation: () => Promise<void>): Promise<unknown> {
-  return exclusively(async () => {
-    commandOutput = undefined;
-    loadEnv();
-    attio.initAttio(requireEnv("ATTIO_API_KEY"));
-    await operation();
-    return commandOutput ?? null;
-  });
-}
-
-async function runTelegramAndAttio(operation: () => Promise<void>): Promise<unknown> {
-  return exclusively(async () => {
-    commandOutput = undefined;
-    loadEnv();
-    attio.initAttio(requireEnv("ATTIO_API_KEY"));
-    try {
-      await connect();
-      await refreshActiveBanList();
-      await operation();
-      return commandOutput ?? null;
-    } finally {
-      await disconnect();
-    }
-  });
-}
-
 async function runLocal(operation: () => Promise<void>): Promise<unknown> {
   return exclusively(async () => {
     commandOutput = undefined;
@@ -166,7 +140,8 @@ function parseBooleanValue(value: string, name: string): boolean {
 }
 
 function optionalBooleanFlag(flags: Record<string, string>, name: string, fallback: boolean | undefined): boolean | undefined {
-  const raw = flags[name];
+  const camelName = name.replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase());
+  const raw = flags[name] ?? flags[camelName];
   if (raw === undefined) return fallback;
   return parseBooleanValue(raw, `--${name}`);
 }
@@ -186,23 +161,6 @@ function isBanFolderName(name: string): boolean {
 function assertNotBanFolderName(name: string, operation: string): void {
   if (isBanFolderName(name)) {
     die(`Use tellatio bans ${operation} for the "${banFolderNameFromEnv()}" folder`);
-  }
-}
-
-function openLocalState(): { dataDir: string; store: StateStore } {
-  const dataDir = dataDirFromEnv();
-  return { dataDir, store: openState(dataDir) };
-}
-
-function recordRunState(name: string, run: RunState): void {
-  let store: StateStore | undefined;
-  try {
-    store = openLocalState().store;
-    store.setRunState(name, run);
-  } catch {
-    // Run metadata is useful for doctor, but should not make the primary command fail.
-  } finally {
-    store?.close();
   }
 }
 
@@ -482,8 +440,16 @@ async function disconnect(): Promise<void> {
   try {
     await client.disconnect();
   } catch (err) {
+    // Telegram-client teardown occasionally throws once a command has already
+    // returned its payload — surfacing that as a command failure via the
+    // wrapping `finally` blocks would drop otherwise-valid runs. Log the
+    // teardown error to stderr for diagnostics and let the command's success
+    // path remain the exit code.
     if (!(err instanceof Error) || err.message !== "TIMEOUT") {
-      throw err;
+      const msg = err instanceof Error ? (err.stack || err.message) : String(err);
+      try {
+        process.stderr.write(`[tellatio] disconnect error ignored: ${msg}\n`);
+      } catch {}
     }
   }
 }
@@ -632,26 +598,6 @@ function chatDisplayName(c: unknown, fallback = "Unknown"): string {
   return fallback;
 }
 
-function compactText(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
-}
-
-function uniqueStrings(values: Array<string | undefined>): string[] {
-  const seen = new Set<string>();
-  const result: string[] = [];
-
-  for (const value of values) {
-    const trimmed = value?.trim();
-    if (!trimmed) continue;
-    const key = normalizeAssociationName(trimmed);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    result.push(trimmed);
-  }
-
-  return result;
-}
-
 // ── folders ─────────────────────────────────────────────────────
 
 interface ResolvedFolderPeer {
@@ -663,25 +609,34 @@ function isDialogFolder(filter: Api.TypeDialogFilter): filter is Api.DialogFilte
   return filter instanceof Api.DialogFilter;
 }
 
-function dialogFolderTitle(folder: Api.DialogFilter): string {
+type NamedDialogFolder = Api.DialogFilter | Api.DialogFilterChatlist;
+
+function namedDialogFolders(filters: Api.TypeDialogFilter[]): NamedDialogFolder[] {
+  return filters.filter((filter): filter is NamedDialogFolder =>
+    filter instanceof Api.DialogFilter || filter instanceof Api.DialogFilterChatlist);
+}
+
+function dialogFolderTitle(folder: NamedDialogFolder): string {
   return folder.title.text;
 }
 
-function serializeFolder(folder: Api.DialogFilter): Record<string, unknown> {
+function serializeFolder(folder: NamedDialogFolder): Record<string, unknown> {
+  const regular = folder instanceof Api.DialogFilter ? folder : undefined;
   return {
     id: folder.id,
     title: dialogFolderTitle(folder),
+    shared: folder instanceof Api.DialogFilterChatlist,
     peerCount: folder.includePeers.length,
     pinnedPeerCount: folder.pinnedPeers.length,
-    excludePeerCount: folder.excludePeers.length,
-    contacts: Boolean(folder.contacts),
-    nonContacts: Boolean(folder.nonContacts),
-    groups: Boolean(folder.groups),
-    channels: Boolean(folder.broadcasts),
-    bots: Boolean(folder.bots),
-    excludeMuted: Boolean(folder.excludeMuted),
-    excludeRead: Boolean(folder.excludeRead),
-    excludeArchived: Boolean(folder.excludeArchived),
+    excludePeerCount: regular?.excludePeers.length ?? 0,
+    contacts: Boolean(regular?.contacts),
+    nonContacts: Boolean(regular?.nonContacts),
+    groups: Boolean(regular?.groups),
+    channels: Boolean(regular?.broadcasts),
+    bots: Boolean(regular?.bots),
+    excludeMuted: Boolean(regular?.excludeMuted),
+    excludeRead: Boolean(regular?.excludeRead),
+    excludeArchived: Boolean(regular?.excludeArchived),
     emoticon: folder.emoticon,
     color: folder.color,
   };
@@ -697,15 +652,30 @@ function dialogFolders(filters: Api.TypeDialogFilter[]): Api.DialogFilter[] {
 }
 
 function findDialogFolder(filters: Api.TypeDialogFilter[], name: string): Api.DialogFilter | undefined {
-  return dialogFolders(filters).find((folder) => dialogFolderTitle(folder) === name);
+  const matches = dialogFolders(filters).filter((folder) => dialogFolderTitle(folder) === name);
+  if (matches.length > 1) die(`Folder "${name}" is ambiguous. Use a folder ID: ${matches.map((f) => `#${f.id}`).join(", ")}`);
+  return matches[0];
 }
 
-function requireDialogFolder(filters: Api.TypeDialogFilter[], name: string): Api.DialogFilter {
-  const folder = findDialogFolder(filters, name);
-  if (folder) return folder;
+function selectDialogFolder(filters: Api.TypeDialogFilter[], selector: string): NamedDialogFolder {
+  const folders = namedDialogFolders(filters);
+  const id = /^#\d+$/.test(selector) ? Number(selector.slice(1)) : undefined;
+  const matches = folders.filter((folder) => id === undefined
+    ? dialogFolderTitle(folder) === selector
+    : folder.id === id);
+  if (matches.length > 1) die(`Folder "${selector}" is ambiguous. Use a folder ID: ${matches.map((f) => `#${f.id}`).join(", ")}`);
+  if (matches[0]) return matches[0];
 
-  const names = dialogFolders(filters).map(dialogFolderTitle);
-  die(`Folder "${name}" not found. Available: ${names.join(", ")}`);
+  const names = folders.map((folder) => `${dialogFolderTitle(folder)} (#${folder.id})`);
+  die(`Folder "${selector}" not found. Available: ${names.join(", ") || "none"}`);
+}
+
+function requireDialogFolder(filters: Api.TypeDialogFilter[], selector: string): Api.DialogFilter {
+  const folder = selectDialogFolder(filters, selector);
+  // Check the resolved title too: selecting by ID must not bypass the ban-folder boundary.
+  assertNotBanFolderName(dialogFolderTitle(folder), "list/add/remove");
+  if (folder instanceof Api.DialogFilter) return folder;
+  die(`Folder "${dialogFolderTitle(folder)}" is shared. Editing shared folders is not supported; manage it in Telegram.`);
 }
 
 function nextDialogFolderId(filters: Api.TypeDialogFilter[]): number {
@@ -732,9 +702,18 @@ function folderHasBuiltInSource(folder: Api.DialogFilter): boolean {
 }
 
 function validateDialogFolderName(name: string): void {
+  if (!name.trim()) die("Telegram folder names must not be blank");
   if (Array.from(name).length > 12) {
     die("Telegram folder names are limited to 12 characters");
   }
+}
+
+function folderColor(value: string): number {
+  const color = Number(value);
+  if (!value.trim() || !Number.isInteger(color) || color < -1 || color > 6) {
+    die("Telegram folder color must be an integer from -1 to 6");
+  }
+  return color;
 }
 
 function cloneDialogFolder(
@@ -750,8 +729,8 @@ function cloneDialogFolder(
     excludeArchived: boolean;
     id: number;
     title: Api.TypeTextWithEntities;
-    emoticon: string;
-    color: number;
+    emoticon: string | null;
+    color: number | null;
     pinnedPeers: Api.TypeInputPeer[];
     includePeers: Api.TypeInputPeer[];
     excludePeers: Api.TypeInputPeer[];
@@ -769,8 +748,8 @@ function cloneDialogFolder(
     titleNoanimate: folder.titleNoanimate,
     id: overrides.id ?? folder.id,
     title: overrides.title ?? folder.title,
-    emoticon: overrides.emoticon ?? folder.emoticon,
-    color: overrides.color ?? folder.color,
+    emoticon: overrides.emoticon === null ? undefined : overrides.emoticon ?? folder.emoticon,
+    color: overrides.color === null ? undefined : overrides.color ?? folder.color,
     pinnedPeers: overrides.pinnedPeers ?? folder.pinnedPeers,
     includePeers: overrides.includePeers ?? folder.includePeers,
     excludePeers: overrides.excludePeers ?? folder.excludePeers,
@@ -797,8 +776,13 @@ async function resolveFolderPeers(value: string): Promise<ResolvedFolderPeer[]> 
   if (identifiers.length === 0) die("Expected at least one chat identifier");
 
   const peers: ResolvedFolderPeer[] = [];
+  const seen = new Set<string>();
   for (const identifier of identifiers) {
-    peers.push(await resolveFolderPeer(identifier));
+    const resolved = await resolveFolderPeer(identifier);
+    const key = inputPeerKey(resolved.peer);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    peers.push(resolved);
   }
   return peers;
 }
@@ -848,76 +832,60 @@ function sourceFlagOverrides(folder: Api.DialogFilter, flags: Record<string, str
 }
 
 function ensureFolderHasSourceOrPeers(folder: Api.DialogFilter): void {
-  if (folder.includePeers.length > 0 || folderHasBuiltInSource(folder)) return;
+  if (folder.includePeers.length > 0 || folder.pinnedPeers.length > 0 || folderHasBuiltInSource(folder)) return;
   die("Telegram folders need at least one included chat or built-in source. Add a source, add a chat, or delete the folder.");
 }
 
 
 export {
-  activeBanFolderSummary,
-  assertEntityAllowed,
-  assertIdentifierAllowed,
-  assertNotBanFolderName,
-  assertWritesAllowed,
-  activeBanList,
-  associationChatType,
-  banEntryFromEntity,
-  banFolderNameFromEnv,
-  chatDisplayName,
-  client,
-  cloneDialogFolder,
-  commandFlags,
-  compactText,
-  connect,
-  csv,
-  dataDirFromEnv,
-  dialogCanonicalId,
-  dialogFolderTitle,
-  dialogFolders,
-  die,
-  disconnect,
-  dryRun,
-  ensureFolderHasSourceOrPeers,
-  entityIdString,
-  execFileAsync,
-  filterBannedDialogs,
-  filterBannedMessages,
-  findDialogFolder,
-  flagEnabled,
-  folderDryRun,
-  folderHasBuiltInSource,
-  folderTitle,
-  inputPeerKey,
-  isBanFolderName,
-  isMessageFromBannedUser,
-  loadCliBanList,
-  loadDialogFilters,
-  loadEnv,
-  matchBannedEntity,
-  nextDialogFolderId,
-  numFlag,
-  openLocalState,
-  out,
-  recordRunState,
-  refreshActiveBanList,
-  requireDialogFolder,
-  requireEnv,
-  resolveEntity,
-  resolveEntityFromDialogFilters,
-  resolveFolderPeers,
-  runAttio,
-  runLocal,
-  runTelegram,
-  runTelegramAndAttio,
-  runTelegramMaybeWrite,
-  runTelegramWrite,
-  saveDialogFolder,
-  serializeBan,
-  serializeChat,
-  serializeFolder,
-  serializeInputPeer,
-  serializeUser,
-  sourceFlagOverrides,
-  uniqueStrings,
-  validateDialogFolderName
+activeBanFolderSummary,activeBanList,assertEntityAllowed,
+assertIdentifierAllowed,
+assertNotBanFolderName,
+assertWritesAllowed,associationChatType,
+banEntryFromEntity,
+banFolderNameFromEnv,
+chatDisplayName,
+client,
+cloneDialogFolder,
+commandFlags,
+connect,
+csv,
+dataDirFromEnv,
+dialogCanonicalId,dialogFolders,dialogFolderTitle,die,
+disconnect,
+dryRun,
+ensureFolderHasSourceOrPeers,
+entityIdString,
+filterBannedDialogs,
+filterBannedMessages,
+findDialogFolder,
+flagEnabled,folderColor,folderDryRun,folderHasBuiltInSource,
+folderTitle,
+inputPeerKey,
+isBanFolderName,
+isMessageFromBannedUser,
+loadCliBanList,
+loadDialogFilters,
+loadEnv,
+matchBannedEntity,namedDialogFolders,nextDialogFolderId,numFlag,
+out,
+refreshActiveBanList,
+requireDialogFolder,
+requireEnv,
+resolveEntity,
+resolveEntityFromDialogFilters,
+resolveFolderPeers,
+runLocal,
+runTelegram,
+runTelegramMaybeWrite,
+runTelegramWrite,
+saveDialogFolder,
+selectDialogFolder,
+serializeBan,
+serializeChat,
+serializeFolder,
+serializeInputPeer,
+serializeUser,
+sourceFlagOverrides,
+validateDialogFolderName
 };

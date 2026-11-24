@@ -19,8 +19,8 @@ export function initAttio(key: string): void {
   apiKey = key;
 }
 
-export { AttioApiError } from "./attio-http";
-import { attioRequest, attioSegment, MAX_ATTIO_BYTES } from "./attio-http";
+export { AttioApiError } from "./http";
+import { attioRequest, attioSegment, MAX_ATTIO_BYTES } from "./http";
 
 function attioFetch(path: string, options: RequestInit = {}): Promise<Response> {
   return attioRequest(apiKey, path, options);
@@ -398,6 +398,20 @@ export async function getPersonSummary(recordId: string): Promise<PersonSummary 
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes("Attio API 404")) return null;
+    throw err;
+  }
+}
+
+// Existence check for any object/record. Returns false only on a definitive 404
+// (record deleted or merged away); other errors propagate so callers don't
+// mistake a transient failure for a dead target.
+export async function recordExists(objectSlug: string, recordId: string): Promise<boolean> {
+  try {
+    await attioFetch(`/objects/${objectSlug}/records/${recordId}`, { method: "GET" });
+    return true;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("Attio API 404")) return false;
     throw err;
   }
 }
